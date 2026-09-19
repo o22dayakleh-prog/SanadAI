@@ -3,6 +3,7 @@ import logging
 import threading
 import tempfile
 import asyncio
+
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from telegram import Update
@@ -18,9 +19,9 @@ from google import genai
 from google.genai import types
 
 
-# =========================================================
+# ============================================================
 # إعداد التسجيل
-# =========================================================
+# ============================================================
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -30,32 +31,23 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-# =========================================================
+# ============================================================
 # مفاتيح التشغيل
-# =========================================================
+# ============================================================
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-
-# =========================================================
-# إعدادات الاشتراك
-# =========================================================
-
 PAYMENT_WALLET = os.getenv("PAYMENT_WALLET")
-SUBSCRIPTION_PRICE_USDT = os.getenv(
-    "SUBSCRIPTION_PRICE_USDT",
-    "3"
-)
-SUBSCRIPTION_DAYS = os.getenv(
-    "SUBSCRIPTION_DAYS",
-    "30"
-)
+SUBSCRIPTION_PRICE_USDT = os.getenv("SUBSCRIPTION_PRICE_USDT", "3")
+SUBSCRIPTION_DAYS = os.getenv("SUBSCRIPTION_DAYS", "30")
 
 
-# =========================================================
-# إعداد Gemini
-# =========================================================
+# ============================================================
+# نموذج Gemini
+# ============================================================
+
+GEMINI_MODEL = "gemini-3.6-flash"
 
 gemini_client = None
 
@@ -65,46 +57,24 @@ if GEMINI_API_KEY:
     )
 
 
-# =========================================================
-# اسم النموذج
-# =========================================================
-
-GEMINI_MODEL = "gemini-3.6-flash"
-
-
-# =========================================================
-# خادم HTTP الخاص بـ Render
-# =========================================================
+# ============================================================
+# خادم الصحة الخاص بـ Render
+# ============================================================
 
 class HealthHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
-
         self.send_response(200)
-
-        self.send_header(
-            "Content-type",
-            "text/plain; charset=utf-8"
-        )
-
+        self.send_header("Content-Type", "text/plain")
         self.end_headers()
-
-        self.wfile.write(
-            b"SanadAI is running"
-        )
+        self.wfile.write(b"SanadAI is running.")
 
     def log_message(self, format, *args):
         return
 
 
 def start_health_server():
-
-    port = int(
-        os.environ.get(
-            "PORT",
-            10000
-        )
-    )
+    port = int(os.environ.get("PORT", "10000"))
 
     server = HTTPServer(
         ("0.0.0.0", port),
@@ -112,119 +82,84 @@ def start_health_server():
     )
 
     logger.info(
-        f"Health server running on port {port}"
+        "Health server started on port %s",
+        port,
     )
 
     server.serve_forever()
 
 
-# =========================================================
+# ============================================================
 # أمر البداية
-# =========================================================
+# ============================================================
 
-async def start(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    if not update.message:
-        return
-
-    user = update.effective_user
-
-    name = (
-        user.first_name
-        if user
-        else "صديقي"
+    message = (
+        "🤖 أهلاً بك في SanadAI\n\n"
+        "أنا مساعد ذكاء اصطناعي متعدد الاستخدامات.\n\n"
+        "يمكنك إرسال:\n"
+        "💬 نص\n"
+        "🖼️ صورة\n"
+        "📄 PDF\n"
+        "📝 Word\n"
+        "📊 Excel\n"
+        "📋 CSV\n"
+        "📃 TXT\n\n"
+        "أرسل ما تريد تحليله وسأحاول مساعدتك."
     )
 
-    text = f"""
-مرحبًا {name} 👋
-
-أنا SanadAI 🧠
-
-مساعدك الذكي للدراسة والعمل والحياة اليومية.
-
-يمكنك الآن استخدامي في:
-
-💬 الأسئلة والمحادثة
-🎓 الدراسة والجامعة
-🔬 العلوم والفيزياء والكيمياء
-⚙️ الهندسة والتقنيات
-💻 البرمجة وعلوم الحاسوب
-📚 الشرح والتلخيص
-📝 الكتابة والترجمة
-🖼️ تحليل الصور
-📄 تحليل ملفات PDF
-
-أرسل سؤالك أو صورة أو ملف PDF وسأحاول مساعدتك.
-"""
-
-    await update.message.reply_text(
-        text
-    )
+    await update.message.reply_text(message)
 
 
-# =========================================================
-# فحص جاهزية Gemini
-# =========================================================
+# ============================================================
+# فحص Gemini
+# ============================================================
 
-async def check_gemini(
-    update: Update
-):
+async def check_gemini():
 
-    if not gemini_client:
-
-        await update.message.reply_text(
-            "⚠️ خدمة الذكاء الاصطناعي غير مفعّلة حاليًا."
-        )
-
+    if gemini_client is None:
         return False
 
     return True
 
 
-# =========================================================
-# دالة تشغيل Gemini بطريقة لا تعطل البوت
-# =========================================================
+# ============================================================
+# تشغيل Gemini بطريقة لا توقف البوت
+# ============================================================
 
-async def run_gemini(
-    contents
-):
+async def run_gemini(contents):
 
-    return await asyncio.to_thread(
-        gemini_client.models.generate_content,
-        model=GEMINI_MODEL,
-        contents=contents,
-    )
+    if gemini_client is None:
+        raise RuntimeError(
+            "GEMINI_API_KEY غير موجود."
+        )
+
+    def generate():
+
+        return gemini_client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=contents,
+        )
+
+    return await asyncio.to_thread(generate)
 
 
-# =========================================================
-# معالجة الرسائل النصية
-# =========================================================
+# ============================================================
+# الرسائل النصية
+# ============================================================
 
 async def handle_message(
     update: Update,
-    context: ContextTypes.DEFAULT_TYPE
+    context: ContextTypes.DEFAULT_TYPE,
 ):
 
-    if (
-        not update.message
-        or not update.message.text
-    ):
-        return
-
-    user_text = (
-        update.message.text.strip()
-    )
-
-    if not user_text:
-        return
-
-    if not await check_gemini(update):
-        return
-
     try:
+
+        user_text = update.message.text
+
+        if not user_text:
+            return
 
         response = await run_gemini(
             user_text
@@ -233,208 +168,242 @@ async def handle_message(
         answer = response.text
 
         if not answer:
-
-            answer = (
-                "لم أتمكن من الحصول على إجابة."
-            )
+            answer = "⚠️ لم أستطع الحصول على إجابة."
 
         await update.message.reply_text(
             answer
         )
 
-    except Exception:
+    except Exception as e:
 
         logger.exception(
-            "Gemini text error"
+            "Text processing error"
         )
 
         await update.message.reply_text(
-            "⚠️ حدث خطأ أثناء معالجة طلبك. "
-            "حاول مرة أخرى."
+            "⚠️ حدث خطأ أثناء معالجة رسالتك."
         )
 
 
-# =========================================================
-# معالجة الصور
-# =========================================================
+# ============================================================
+# الصور
+# ============================================================
 
 async def handle_photo(
     update: Update,
-    context: ContextTypes.DEFAULT_TYPE
+    context: ContextTypes.DEFAULT_TYPE,
 ):
-
-    if (
-        not update.message
-        or not update.message.photo
-    ):
-        return
-
-    if not await check_gemini(update):
-        return
 
     try:
 
-        # أعلى دقة متوفرة للصورة
+        await update.message.reply_text(
+            "🖼️ تم استلام الصورة.\n"
+            "⏳ جارٍ تحليلها..."
+        )
+
         photo = update.message.photo[-1]
 
-        # الحصول على الملف من Telegram
-        telegram_file = (
-            await context.bot.get_file(
-                photo.file_id
-            )
+        telegram_file = await context.bot.get_file(
+            photo.file_id
         )
 
-        # تنزيل الصورة
-        image_bytes = (
-            await telegram_file.download_as_bytearray()
-        )
+        image_bytes = await telegram_file.download_as_bytearray()
 
-        # النص المرفق بالصورة
         user_text = (
             update.message.caption
             or
             "حلل هذه الصورة واشرح لي ما تحتويه بالتفصيل."
         )
 
-        # إرسال الصورة + السؤال إلى Gemini
+        contents = [
+            types.Part.from_bytes(
+                data=bytes(image_bytes),
+                mime_type="image/jpeg",
+            ),
+            user_text,
+        ]
+
         response = await run_gemini(
-            [
-                types.Part.from_bytes(
-                    data=bytes(image_bytes),
-                    mime_type="image/jpeg",
-                ),
-                user_text,
-            ]
+            contents
         )
 
         answer = response.text
 
         if not answer:
-
-            answer = (
-                "لم أتمكن من تحليل الصورة."
-            )
+            answer = "⚠️ لم أستطع تحليل الصورة."
 
         await update.message.reply_text(
             answer
         )
 
-    except Exception:
+    except Exception as e:
 
         logger.exception(
-            "Gemini image error"
+            "Image processing error"
         )
 
         await update.message.reply_text(
-            "⚠️ حدث خطأ أثناء تحليل الصورة. "
-            "حاول مرة أخرى."
+            "⚠️ حدث خطأ أثناء تحليل الصورة.\n"
+            "حاول إرسالها مرة أخرى."
         )
 
 
-# =========================================================
-# معالجة ملفات PDF
-# =========================================================
+# ============================================================
+# أنواع الملفات المدعومة
+# ============================================================
+
+SUPPORTED_DOCUMENTS = {
+
+    ".pdf":
+        "application/pdf",
+
+    ".docx":
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+
+    ".xlsx":
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+
+    ".xls":
+        "application/vnd.ms-excel",
+
+    ".csv":
+        "text/csv",
+
+    ".txt":
+        "text/plain",
+
+}
+
+
+# ============================================================
+# معالجة الملفات
+# ============================================================
 
 async def handle_document(
     update: Update,
-    context: ContextTypes.DEFAULT_TYPE
+    context: ContextTypes.DEFAULT_TYPE,
 ):
 
-    if (
-        not update.message
-        or not update.message.document
-    ):
-        return
-
-    if not await check_gemini(update):
-        return
-
-    document = update.message.document
-
-    file_name = (
-        document.file_name
-        or "document"
-    )
-
-    mime_type = (
-        document.mime_type
-        or ""
-    )
-
-    # =====================================================
-    # السماح بملفات PDF فقط في هذه المرحلة
-    # =====================================================
-
-    if (
-        mime_type != "application/pdf"
-        and not file_name.lower().endswith(".pdf")
-    ):
-
-        await update.message.reply_text(
-            "📄 في هذه المرحلة أستطيع تحليل ملفات PDF فقط.\n\n"
-            "أرسل ملف PDF وسأحاول تحليل محتواه."
-        )
-
-        return
-
     temp_path = None
+    uploaded_file = None
 
     try:
 
-        await update.message.reply_text(
-            "📄 تم استلام ملف PDF.\n"
-            "⏳ جارٍ قراءة الملف وتحليله..."
-        )
+        document = update.message.document
 
-        # الحصول على الملف من Telegram
-        telegram_file = (
-            await context.bot.get_file(
-                document.file_id
+        if document is None:
+            return
+
+        file_name = document.file_name or "file"
+
+        extension = os.path.splitext(
+            file_name
+        )[1].lower()
+
+        mime_type = document.mime_type
+
+        if extension not in SUPPORTED_DOCUMENTS:
+
+            await update.message.reply_text(
+                "⚠️ هذا النوع من الملفات غير مدعوم حاليًا.\n\n"
+                "الأنواع المدعومة:\n"
+                "📄 PDF\n"
+                "📝 Word (.docx)\n"
+                "📊 Excel (.xlsx / .xls)\n"
+                "📋 CSV\n"
+                "📃 TXT"
             )
+
+            return
+
+        if not mime_type:
+
+            mime_type = SUPPORTED_DOCUMENTS[
+                extension
+            ]
+
+        if extension == ".pdf":
+
+            icon = "📄"
+
+        elif extension == ".docx":
+
+            icon = "📝"
+
+        elif extension in [".xlsx", ".xls"]:
+
+            icon = "📊"
+
+        elif extension == ".csv":
+
+            icon = "📋"
+
+        else:
+
+            icon = "📃"
+
+        await update.message.reply_text(
+            f"{icon} تم استلام الملف:\n"
+            f"{file_name}\n\n"
+            "⏳ جارٍ قراءته وتحليله..."
         )
 
-        # إنشاء ملف مؤقت
+        telegram_file = await context.bot.get_file(
+            document.file_id
+        )
+
+        suffix = extension if extension else ".tmp"
+
         with tempfile.NamedTemporaryFile(
-            suffix=".pdf",
-            delete=False
+            delete=False,
+            suffix=suffix,
         ) as temp_file:
 
             temp_path = temp_file.name
 
-        # تنزيل PDF إلى الملف المؤقت
         await telegram_file.download_to_drive(
             custom_path=temp_path
         )
 
-        # =================================================
+        # ----------------------------------------------------
         # رفع الملف إلى Gemini
-        # =================================================
+        # ----------------------------------------------------
+
+        def upload_file():
+
+            return gemini_client.files.upload(
+                file=temp_path
+            )
 
         uploaded_file = await asyncio.to_thread(
-            gemini_client.files.upload,
-            file=temp_path
+            upload_file
         )
 
-        # =================================================
-        # السؤال المرفق مع الملف
-        # =================================================
-
-        user_text = (
+        user_prompt = (
             update.message.caption
             or
-            "حلل هذا الملف بالتفصيل، "
-            "ولخص محتواه، واستخرج أهم المعلومات "
-            "والنقاط الرئيسية منه."
+            "اقرأ هذا الملف بالكامل ثم حلله بدقة. "
+            "استخرج أهم المعلومات والحقائق والأرقام، "
+            "وأجب عن أي سؤال مرتبط بمحتواه. "
+            "إذا كان هناك تناقض أو خطأ واضح في الملف، "
+            "اذكره وصححه. "
+            "إذا كان الملف جدولًا، فحلل البيانات الموجودة فيه. "
+            "قدّم الإجابة باللغة العربية ما لم يطلب المستخدم لغة أخرى."
         )
 
-        # =================================================
-        # إرسال الملف + الطلب إلى Gemini
-        # =================================================
+        # ----------------------------------------------------
+        # إرسال الملف مع الطلب إلى Gemini
+        # ----------------------------------------------------
+
+        file_part = types.Part.from_uri(
+            file_uri=uploaded_file.uri,
+            mime_type=uploaded_file.mime_type or mime_type,
+        )
 
         response = await run_gemini(
             [
-                uploaded_file,
-                user_text,
+                file_part,
+                user_prompt,
             ]
         )
 
@@ -443,29 +412,26 @@ async def handle_document(
         if not answer:
 
             answer = (
-                "لم أتمكن من استخراج إجابة من ملف PDF."
+                "⚠️ تم استلام الملف، "
+                "لكن لم أستطع استخراج إجابة منه."
             )
 
         await update.message.reply_text(
             answer
         )
 
-    except Exception:
+    except Exception as e:
 
         logger.exception(
-            "PDF processing error"
+            "Document processing error"
         )
 
         await update.message.reply_text(
-            "⚠️ حدث خطأ أثناء معالجة ملف PDF.\n"
-            "حاول إرسال الملف مرة أخرى."
+            "⚠️ حدث خطأ أثناء قراءة الملف.\n"
+            "تأكد من أن الملف سليم وحاول مرة أخرى."
         )
 
     finally:
-
-        # =================================================
-        # حذف الملف المؤقت من Render
-        # =================================================
 
         if temp_path:
 
@@ -476,32 +442,30 @@ async def handle_document(
 
             except Exception:
 
-                logger.exception(
-                    "Temporary PDF cleanup error"
+                logger.warning(
+                    "Could not remove temporary file"
                 )
 
 
-# =========================================================
-# تشغيل البوت
-# =========================================================
+# ============================================================
+# التشغيل الرئيسي
+# ============================================================
 
 def main():
 
     if not TELEGRAM_BOT_TOKEN:
 
         raise RuntimeError(
-            "TELEGRAM_BOT_TOKEN غير موجود"
+            "TELEGRAM_BOT_TOKEN غير موجود."
         )
 
     if not GEMINI_API_KEY:
 
         raise RuntimeError(
-            "GEMINI_API_KEY غير موجود"
+            "GEMINI_API_KEY غير موجود."
         )
 
-    # =====================================================
-    # تشغيل خادم Render
-    # =====================================================
+    # تشغيل خادم Render في الخلفية
 
     health_thread = threading.Thread(
         target=start_health_server,
@@ -510,9 +474,7 @@ def main():
 
     health_thread.start()
 
-    # =====================================================
     # إنشاء تطبيق Telegram
-    # =====================================================
 
     application = (
         Application.builder()
@@ -520,64 +482,52 @@ def main():
         .build()
     )
 
-    # =====================================================
-    # أمر البداية
-    # =====================================================
+    # الأوامر
 
     application.add_handler(
         CommandHandler(
             "start",
-            start
+            start,
         )
     )
 
-    # =====================================================
     # الصور
-    # =====================================================
 
     application.add_handler(
         MessageHandler(
             filters.PHOTO,
-            handle_photo
+            handle_photo,
         )
     )
 
-    # =====================================================
-    # ملفات PDF والملفات الأخرى
-    # =====================================================
+    # جميع الملفات
 
     application.add_handler(
         MessageHandler(
             filters.Document.ALL,
-            handle_document
+            handle_document,
         )
     )
 
-    # =====================================================
     # الرسائل النصية
-    # =====================================================
 
     application.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND,
-            handle_message
+            handle_message,
         )
     )
 
     logger.info(
-        "SanadAI is running..."
+        "SanadAI bot is starting..."
     )
-
-    # =====================================================
-    # تشغيل Telegram Polling
-    # =====================================================
 
     application.run_polling()
 
 
-# =========================================================
-# بداية البرنامج
-# =========================================================
+# ============================================================
+# نقطة البداية
+# ============================================================
 
 if __name__ == "__main__":
     main()
