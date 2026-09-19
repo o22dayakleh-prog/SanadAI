@@ -13,6 +13,7 @@ from telegram.ext import (
 )
 
 from google import genai
+from google.genai import types
 
 
 # =========================
@@ -36,13 +37,24 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 
 # =========================
+# إعدادات الاشتراك
+# =========================
+
+PAYMENT_WALLET = os.getenv("PAYMENT_WALLET")
+SUBSCRIPTION_PRICE_USDT = os.getenv("SUBSCRIPTION_PRICE_USDT", "3")
+SUBSCRIPTION_DAYS = os.getenv("SUBSCRIPTION_DAYS", "30")
+
+
+# =========================
 # Gemini
 # =========================
 
 gemini_client = None
 
 if GEMINI_API_KEY:
-    gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+    gemini_client = genai.Client(
+        api_key=GEMINI_API_KEY
+    )
 
 
 # =========================
@@ -53,16 +65,24 @@ class HealthHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         self.send_response(200)
-        self.send_header("Content-type", "text/plain")
+        self.send_header(
+            "Content-type",
+            "text/plain; charset=utf-8"
+        )
         self.end_headers()
-        self.wfile.write(b"SanadAI is running")
+        self.wfile.write(
+            b"SanadAI is running"
+        )
 
     def log_message(self, format, *args):
         return
 
 
 def start_health_server():
-    port = int(os.environ.get("PORT", 10000))
+
+    port = int(
+        os.environ.get("PORT", 10000)
+    )
 
     server = HTTPServer(
         ("0.0.0.0", port),
@@ -80,11 +100,18 @@ def start_health_server():
 # أمر البداية
 # =========================
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     user = update.effective_user
 
-    name = user.first_name if user else "صديقي"
+    name = (
+        user.first_name
+        if user
+        else "صديقي"
+    )
 
     text = f"""
 مرحبًا {name} 👋
@@ -96,32 +123,29 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 يمكنك أن تسألني عن:
 
 🎓 الدراسة والجامعة
-🔧 الميكانيك والفنيّات
-🏗️ الهندسة
-💼 العمل الحر
+🔬 العلوم والفيزياء والكيمياء
+⚙️ الهندسة والتقنيات
+💻 البرمجة وعلوم الحاسوب
+📚 الشرح والتلخيص
 📝 الكتابة والترجمة
-📚 التلخيص والشرح
 🧠 المعلومات العامة
+🖼️ تحليل الصور
 
-أرسل سؤالك الآن.
+أرسل سؤالك أو صورة الآن.
 """
 
-    await update.message.reply_text(text)
+    await update.message.reply_text(
+        text
+    )
 
 
 # =========================
-# معالجة الرسائل
+# فحص جاهزية Gemini
 # =========================
 
-async def handle_message(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
+async def check_gemini(
+    update: Update
 ):
-
-    if not update.message or not update.message.text:
-        return
-
-    user_text = update.message.text.strip()
 
     if not gemini_client:
 
@@ -129,28 +153,140 @@ async def handle_message(
             "⚠️ خدمة الذكاء الاصطناعي غير مفعّلة حاليًا."
         )
 
+        return False
+
+    return True
+
+
+# =========================
+# معالجة الرسائل النصية
+# =========================
+
+async def handle_message(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    if (
+        not update.message
+        or not update.message.text
+    ):
+        return
+
+    user_text = update.message.text.strip()
+
+    if not await check_gemini(update):
         return
 
     try:
 
-        response = gemini_client.models.generate_content(
-            model="gemini-3.6-flash",
-            contents=user_text,
+        response = (
+            gemini_client.models.generate_content(
+                model="gemini-3.6-flash",
+                contents=user_text,
+            )
         )
 
         answer = response.text
 
         if not answer:
-            answer = "لم أتمكن من الحصول على إجابة."
 
-        await update.message.reply_text(answer)
+            answer = (
+                "لم أتمكن من الحصول على إجابة."
+            )
+
+        await update.message.reply_text(
+            answer
+        )
 
     except Exception:
 
-        logger.exception("Gemini error")
+        logger.exception(
+            "Gemini text error"
+        )
 
         await update.message.reply_text(
-            "⚠️ حدث خطأ أثناء معالجة طلبك. حاول مرة أخرى."
+            "⚠️ حدث خطأ أثناء معالجة طلبك. "
+            "حاول مرة أخرى."
+        )
+
+
+# =========================
+# معالجة الصور
+# =========================
+
+async def handle_photo(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    if (
+        not update.message
+        or not update.message.photo
+    ):
+        return
+
+    if not await check_gemini(update):
+        return
+
+    try:
+
+        # الحصول على أعلى دقة للصورة
+        photo = update.message.photo[-1]
+
+        # تحميل الصورة من Telegram
+        telegram_file = (
+            await context.bot.get_file(
+                photo.file_id
+            )
+        )
+
+        image_bytes = (
+            await telegram_file.download_as_bytearray()
+        )
+
+        # النص المرفق بالصورة
+        user_text = (
+            update.message.caption
+            or
+            "حلل هذه الصورة واشرح لي ما تحتويه بالتفصيل."
+        )
+
+        # إرسال الصورة + السؤال إلى Gemini
+        response = (
+            gemini_client.models.generate_content(
+                model="gemini-3.6-flash",
+                contents=[
+                    types.Part.from_bytes(
+                        data=bytes(image_bytes),
+                        mime_type="image/jpeg",
+                    ),
+                    user_text,
+                ],
+            )
+        )
+
+        answer = response.text
+
+        if not answer:
+
+            answer = (
+                "لم أتمكن من تحليل الصورة."
+            )
+
+        await update.message.reply_text(
+            answer
+        )
+
+    except Exception:
+
+        logger.exception(
+            "Gemini image error"
+        )
+
+        await update.message.reply_text(
+            "⚠️ حدث خطأ أثناء تحليل الصورة. "
+            "حاول مرة أخرى."
         )
 
 
@@ -166,7 +302,7 @@ def main():
             "TELEGRAM_BOT_TOKEN غير موجود"
         )
 
-    # تشغيل خادم Render في الخلفية
+    # تشغيل خادم Render
     health_thread = threading.Thread(
         target=start_health_server,
         daemon=True,
@@ -181,18 +317,33 @@ def main():
         .build()
     )
 
+    # أمر البداية
     application.add_handler(
-        CommandHandler("start", start)
-    )
-
-    application.add_handler(
-        MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
-            handle_message,
+        CommandHandler(
+            "start",
+            start
         )
     )
 
-    logger.info("SanadAI is running...")
+    # الصور
+    application.add_handler(
+        MessageHandler(
+            filters.PHOTO,
+            handle_photo
+        )
+    )
+
+    # الرسائل النصية
+    application.add_handler(
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND,
+            handle_message
+        )
+    )
+
+    logger.info(
+        "SanadAI is running..."
+    )
 
     application.run_polling()
 
