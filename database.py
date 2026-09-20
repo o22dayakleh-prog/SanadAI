@@ -168,3 +168,37 @@ def deactivate_expired_subscription(telegram_id):
             )
 
         conn.commit()
+
+
+def get_user_stats():
+    """Return overall user statistics."""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    COUNT(*) AS total_users,
+
+                    COUNT(*) FILTER (
+                        WHERE subscription_active = TRUE
+                          AND subscription_expires_at IS NOT NULL
+                          AND subscription_expires_at > NOW()
+                    ) AS active_subscribers,
+
+                    COUNT(*) FILTER (
+                        WHERE subscription_expires_at IS NOT NULL
+                          AND subscription_expires_at <= NOW()
+                    ) AS expired_subscriptions,
+
+                    COUNT(*) FILTER (
+                        WHERE subscription_active = FALSE
+                          AND questions_used < 3
+                    ) AS free_users_remaining,
+
+                    COALESCE(SUM(questions_used), 0) AS total_questions_used
+
+                FROM users;
+                """
+            )
+
+            return cur.fetchone()
