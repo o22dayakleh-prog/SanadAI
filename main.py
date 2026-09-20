@@ -3,6 +3,7 @@ import logging
 import threading
 import tempfile
 import asyncio
+from datetime import datetime, timezone
 
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -207,13 +208,7 @@ def can_use_service(telegram_id):
             if (
                 subscription_expires_at
                 and
-                subscription_expires_at <= __import__(
-                    "datetime"
-                ).datetime.now(
-                    __import__(
-                        "datetime"
-                    ).timezone.utc
-                )
+                subscription_expires_at <= datetime.now(timezone.utc)
             ):
 
                 deactivate_expired_subscription(
@@ -489,6 +484,239 @@ async def users(
 
         await update.message.reply_text(
             "⚠️ حدث خطأ أثناء الحصول على إحصائيات المستخدمين."
+        )
+
+
+# ============================================================
+# عرض مستخدم محدد - للمالك فقط
+# الاستخدام: /user Telegram_ID
+# ============================================================
+
+async def user_details(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    if not update.effective_user:
+        return
+
+    owner_id = update.effective_user.id
+
+    # --------------------------------------------------------
+    # حماية الأمر
+    # --------------------------------------------------------
+
+    if owner_id != OWNER_TELEGRAM_ID:
+
+        logger.warning(
+            "Unauthorized /user attempt by user %s",
+            owner_id,
+        )
+
+        await update.message.reply_text(
+            "⛔ هذا الأمر غير متاح."
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # التحقق من وجود Telegram ID
+    # --------------------------------------------------------
+
+    if not context.args:
+
+        await update.message.reply_text(
+            "ℹ️ استخدم الأمر بهذا الشكل:\n\n"
+            "/user Telegram_ID\n\n"
+            "مثال:\n"
+            "/user 8840372128"
+        )
+
+        return
+
+    if len(context.args) != 1:
+
+        await update.message.reply_text(
+            "⚠️ يجب إدخال Telegram ID واحد فقط.\n\n"
+            "مثال:\n"
+            "/user 8840372128"
+        )
+
+        return
+
+    target_id_text = context.args[0]
+
+    # --------------------------------------------------------
+    # تحويل Telegram ID إلى رقم
+    # --------------------------------------------------------
+
+    try:
+
+        target_telegram_id = int(
+            target_id_text
+        )
+
+    except ValueError:
+
+        await update.message.reply_text(
+            "⚠️ Telegram ID يجب أن يكون رقمًا فقط.\n\n"
+            "مثال:\n"
+            "/user 8840372128"
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # البحث عن المستخدم
+    # --------------------------------------------------------
+
+    try:
+
+        user = await asyncio.to_thread(
+            get_user,
+            target_telegram_id,
+        )
+
+        if not user:
+
+            await update.message.reply_text(
+                "🔍 لم يتم العثور على هذا المستخدم "
+                "في قاعدة البيانات.\n\n"
+                f"Telegram ID: {target_telegram_id}"
+            )
+
+            return
+
+        # ----------------------------------------------------
+        # بيانات المستخدم
+        # ----------------------------------------------------
+
+        username = user.get(
+            "username"
+        )
+
+        first_name = user.get(
+            "first_name"
+        )
+
+        questions_used = user.get(
+            "questions_used",
+            0,
+        )
+
+        subscription_active = user.get(
+            "subscription_active",
+            False,
+        )
+
+        subscription_expires_at = user.get(
+            "subscription_expires_at"
+        )
+
+        created_at = user.get(
+            "created_at"
+        )
+
+        # ----------------------------------------------------
+        # التحقق الحقيقي من حالة الاشتراك
+        # ----------------------------------------------------
+
+        actual_subscription_active = False
+
+        if subscription_active:
+
+            if (
+                subscription_expires_at
+                and
+                subscription_expires_at > datetime.now(timezone.utc)
+            ):
+
+                actual_subscription_active = True
+
+            elif subscription_expires_at:
+
+                await asyncio.to_thread(
+                    deactivate_expired_subscription,
+                    target_telegram_id,
+                )
+
+        # ----------------------------------------------------
+        # البيانات المعروضة
+        # ----------------------------------------------------
+
+        if actual_subscription_active:
+
+            subscription_status = "🟢 مفعّل"
+
+        else:
+
+            subscription_status = "⚪ غير مفعّل"
+
+        remaining_free = max(
+            FREE_QUESTIONS - questions_used,
+            0,
+        )
+
+        if username:
+
+            username_text = f"@{username}"
+
+        else:
+
+            username_text = "غير موجود"
+
+        if first_name:
+
+            name_text = first_name
+
+        else:
+
+            name_text = "غير موجود"
+
+        if subscription_expires_at:
+
+            expires_text = str(
+                subscription_expires_at
+            )
+
+        else:
+
+            expires_text = "لا يوجد"
+
+        if created_at:
+
+            created_text = str(
+                created_at
+            )
+
+        else:
+
+            created_text = "غير معروف"
+
+        message = (
+            "👤 بيانات المستخدم\n\n"
+            f"🆔 Telegram ID: {target_telegram_id}\n"
+            f"👤 الاسم: {name_text}\n"
+            f"🔹 Username: {username_text}\n"
+            f"🔢 الأسئلة المستخدمة: {questions_used}\n"
+            f"🎁 الأسئلة المجانية المتبقية: {remaining_free}\n"
+            f"💳 الاشتراك: {subscription_status}\n"
+            f"📅 انتهاء الاشتراك: {expires_text}\n"
+            f"🕐 تاريخ إنشاء الحساب: {created_text}"
+        )
+
+        await update.message.reply_text(
+            message
+        )
+
+    except Exception:
+
+        logger.exception(
+            "User details error"
+        )
+
+        await update.message.reply_text(
+            "⚠️ حدث خطأ أثناء الحصول على بيانات المستخدم."
         )
 
 
@@ -1072,6 +1300,13 @@ def main():
         CommandHandler(
             "users",
             users,
+        )
+    )
+
+    application.add_handler(
+        CommandHandler(
+            "user",
+            user_details,
         )
     )
 
