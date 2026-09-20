@@ -46,10 +46,12 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 PAYMENT_WALLET = os.getenv("PAYMENT_WALLET")
+
 SUBSCRIPTION_PRICE_USDT = os.getenv(
     "SUBSCRIPTION_PRICE_USDT",
     "3",
 )
+
 SUBSCRIPTION_DAYS = os.getenv(
     "SUBSCRIPTION_DAYS",
     "30",
@@ -278,10 +280,12 @@ async def check_and_consume(
 
     # المالك يتجاوز نظام الأسئلة المجانية بالكامل
     if telegram_id == OWNER_TELEGRAM_ID:
+
         logger.info(
             "Owner access granted for user %s",
             telegram_id,
         )
+
         return True
 
     allowed, user = await asyncio.to_thread(
@@ -362,7 +366,7 @@ async def start(
 
 
 # ============================================================
-# فحص قاعدة البيانات - مؤقت
+# فحص قاعدة البيانات - للمالك فقط
 # ============================================================
 
 async def mydb(
@@ -370,11 +374,31 @@ async def mydb(
     context: ContextTypes.DEFAULT_TYPE,
 ):
 
+    if not update.effective_user:
+        return
+
+    telegram_id = update.effective_user.id
+
+    # --------------------------------------------------------
+    # حماية الأمر الإداري
+    # --------------------------------------------------------
+
+    if telegram_id != OWNER_TELEGRAM_ID:
+
+        logger.warning(
+            "Unauthorized /mydb attempt by user %s",
+            telegram_id,
+        )
+
+        await update.message.reply_text(
+            "⛔ هذا الأمر غير متاح."
+        )
+
+        return
+
     register_user(update)
 
     try:
-
-        telegram_id = update.effective_user.id
 
         user = await asyncio.to_thread(
             get_user,
