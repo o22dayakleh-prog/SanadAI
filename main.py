@@ -55,6 +55,14 @@ SUBSCRIPTION_DAYS = os.getenv(
     "30",
 )
 
+# Telegram ID الخاص بالمالك
+OWNER_TELEGRAM_ID = int(
+    os.getenv(
+        "OWNER_TELEGRAM_ID",
+        "0",
+    )
+)
+
 
 # ============================================================
 # إعداد الأسئلة المجانية
@@ -174,6 +182,10 @@ def can_use_service(telegram_id):
         if not user:
             return False, None
 
+        # المالك لديه استخدام مجاني بلا حدود
+        if telegram_id == OWNER_TELEGRAM_ID:
+            return True, user
+
         subscription_active = user.get(
             "subscription_active",
             False,
@@ -208,6 +220,10 @@ def can_use_service(telegram_id):
 # ============================================================
 
 def consume_question(telegram_id):
+
+    # المالك لا يتم احتساب أسئلته
+    if telegram_id == OWNER_TELEGRAM_ID:
+        return 0
 
     try:
 
@@ -259,6 +275,14 @@ async def check_and_consume(
         return False
 
     telegram_id = update.effective_user.id
+
+    # المالك يتجاوز نظام الأسئلة المجانية بالكامل
+    if telegram_id == OWNER_TELEGRAM_ID:
+        logger.info(
+            "Owner access granted for user %s",
+            telegram_id,
+        )
+        return True
 
     allowed, user = await asyncio.to_thread(
         can_use_service,
@@ -960,5 +984,3 @@ def main():
 if __name__ == "__main__":
 
     main()
-
-    
