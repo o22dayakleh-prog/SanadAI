@@ -23,6 +23,8 @@ from database import (
     create_or_update_user,
     get_user,
     increment_questions_used,
+    get_user_stats,
+    deactivate_expired_subscription,
 )
 
 
@@ -57,7 +59,6 @@ SUBSCRIPTION_DAYS = os.getenv(
     "30",
 )
 
-# Telegram ID الخاص بالمالك
 OWNER_TELEGRAM_ID = int(
     os.getenv(
         "OWNER_TELEGRAM_ID",
@@ -188,14 +189,46 @@ def can_use_service(telegram_id):
         if telegram_id == OWNER_TELEGRAM_ID:
             return True, user
 
+        # ----------------------------------------------------
+        # التحقق من انتهاء الاشتراك
+        # ----------------------------------------------------
+
         subscription_active = user.get(
             "subscription_active",
             False,
         )
 
+        subscription_expires_at = user.get(
+            "subscription_expires_at"
+        )
+
+        if subscription_active:
+
+            if (
+                subscription_expires_at
+                and
+                subscription_expires_at <= __import__(
+                    "datetime"
+                ).datetime.now(
+                    __import__(
+                        "datetime"
+                    ).timezone.utc
+                )
+            ):
+
+                deactivate_expired_subscription(
+                    telegram_id
+                )
+
+                subscription_active = False
+
         if subscription_active:
 
             return True, user
+
+        # ----------------------------------------------------
+        # الأسئلة المجانية
+        # ----------------------------------------------------
 
         questions_used = user.get(
             "questions_used",
@@ -223,7 +256,6 @@ def can_use_service(telegram_id):
 
 def consume_question(telegram_id):
 
-    # المالك لا يتم احتساب أسئلته
     if telegram_id == OWNER_TELEGRAM_ID:
         return 0
 
@@ -278,7 +310,6 @@ async def check_and_consume(
 
     telegram_id = update.effective_user.id
 
-    # المالك يتجاوز نظام الأسئلة المجانية بالكامل
     if telegram_id == OWNER_TELEGRAM_ID:
 
         logger.info(
@@ -301,13 +332,17 @@ async def check_and_consume(
 
         return False
 
-    # المستخدم المشترك لا يحتاج إلى استهلاك
-    # من الأسئلة المجانية.
+    # المستخدم المشترك لا يستهلك الأسئلة المجانية
+    subscription_active = (
+        user.get(
+            "subscription_active",
+            False,
+        )
+        if user
+        else False
+    )
 
-    if user and user.get(
-        "subscription_active",
-        False,
-    ):
+    if subscription_active:
 
         return True
 
@@ -366,6 +401,98 @@ async def start(
 
 
 # ============================================================
+# أمر إدارة المستخدمين - للمالك فقط
+# ============================================================
+
+async def users(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    if not update.effective_user:
+        return
+
+    telegram_id = update.effective_user.id
+
+    # حماية الأمر الإداري
+    if telegram_id != OWNER_TELEGRAM_ID:
+
+        logger.warning(
+            "Unauthorized /users attempt by user %s",
+            telegram_id,
+        )
+
+        await update.message.reply_text(
+            "⛔ هذا الأمر غير متاح."
+        )
+
+        return
+
+    try:
+
+        stats = await asyncio.to_thread(
+            get_user_stats
+        )
+
+        if not stats:
+
+            await update.message.reply_text(
+                "⚠️ لم أستطع الحصول على إحصائيات المستخدمين."
+            )
+
+            return
+
+        total_users = stats.get(
+            "total_users",
+            0,
+        )
+
+        active_subscribers = stats.get(
+            "active_subscribers",
+            0,
+        )
+
+        expired_subscriptions = stats.get(
+            "expired_subscriptions",
+            0,
+        )
+
+        free_users_remaining = stats.get(
+            "free_users_remaining",
+            0,
+        )
+
+        total_questions_used = stats.get(
+            "total_questions_used",
+            0,
+        )
+
+        message = (
+            "👑 لوحة إدارة مستخدمي SanadAI\n\n"
+            f"👥 إجمالي المستخدمين: {total_users}\n"
+            f"🎁 لديهم أسئلة مجانية: {free_users_remaining}\n"
+            f"💳 الاشتراكات الفعالة: {active_subscribers}\n"
+            f"⏰ الاشتراكات المنتهية: {expired_subscriptions}\n"
+            f"🔢 إجمالي الأسئلة المستخدمة: {total_questions_used}\n\n"
+            "✅ قاعدة البيانات تعمل بشكل صحيح."
+        )
+
+        await update.message.reply_text(
+            message
+        )
+
+    except Exception:
+
+        logger.exception(
+            "Users statistics error"
+        )
+
+        await update.message.reply_text(
+            "⚠️ حدث خطأ أثناء الحصول على إحصائيات المستخدمين."
+        )
+
+
+# ============================================================
 # فحص قاعدة البيانات - للمالك فقط
 # ============================================================
 
@@ -378,10 +505,6 @@ async def mydb(
         return
 
     telegram_id = update.effective_user.id
-
-    # --------------------------------------------------------
-    # حماية الأمر الإداري
-    # --------------------------------------------------------
 
     if telegram_id != OWNER_TELEGRAM_ID:
 
@@ -795,10 +918,6 @@ async def handle_document(
             custom_path=temp_path
         )
 
-        # ----------------------------------------------------
-        # رفع الملف إلى Gemini
-        # ----------------------------------------------------
-
         def upload_file():
 
             return gemini_client.files.upload(
@@ -902,10 +1021,6 @@ def main():
             "GEMINI_API_KEY غير موجود."
         )
 
-    # --------------------------------------------------------
-    # تهيئة قاعدة البيانات
-    # --------------------------------------------------------
-
     try:
 
         init_database()
@@ -922,10 +1037,6 @@ def main():
 
         raise
 
-    # --------------------------------------------------------
-    # تشغيل خادم Render
-    # --------------------------------------------------------
-
     health_thread = threading.Thread(
         target=start_health_server,
         daemon=True,
@@ -933,19 +1044,15 @@ def main():
 
     health_thread.start()
 
-    # --------------------------------------------------------
-    # إنشاء تطبيق Telegram
-    # --------------------------------------------------------
-
     application = (
         Application.builder()
         .token(TELEGRAM_BOT_TOKEN)
         .build()
     )
 
-    # --------------------------------------------------------
+    # ========================================================
     # الأوامر
-    # --------------------------------------------------------
+    # ========================================================
 
     application.add_handler(
         CommandHandler(
@@ -961,9 +1068,16 @@ def main():
         )
     )
 
-    # --------------------------------------------------------
+    application.add_handler(
+        CommandHandler(
+            "users",
+            users,
+        )
+    )
+
+    # ========================================================
     # الصور
-    # --------------------------------------------------------
+    # ========================================================
 
     application.add_handler(
         MessageHandler(
@@ -972,9 +1086,9 @@ def main():
         )
     )
 
-    # --------------------------------------------------------
+    # ========================================================
     # الملفات
-    # --------------------------------------------------------
+    # ========================================================
 
     application.add_handler(
         MessageHandler(
@@ -983,9 +1097,9 @@ def main():
         )
     )
 
-    # --------------------------------------------------------
+    # ========================================================
     # الرسائل النصية
-    # --------------------------------------------------------
+    # ========================================================
 
     application.add_handler(
         MessageHandler(
