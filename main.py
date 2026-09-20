@@ -18,6 +18,11 @@ from telegram.ext import (
 from google import genai
 from google.genai import types
 
+from database import (
+    init_database,
+    create_or_update_user,
+)
+
 
 # ============================================================
 # إعداد التسجيل
@@ -65,16 +70,27 @@ class HealthHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         self.send_response(200)
-        self.send_header("Content-Type", "text/plain")
+        self.send_header(
+            "Content-Type",
+            "text/plain"
+        )
         self.end_headers()
-        self.wfile.write(b"SanadAI is running.")
+        self.wfile.write(
+            b"SanadAI is running."
+        )
 
     def log_message(self, format, *args):
         return
 
 
 def start_health_server():
-    port = int(os.environ.get("PORT", "10000"))
+
+    port = int(
+        os.environ.get(
+            "PORT",
+            "10000"
+        )
+    )
 
     server = HTTPServer(
         ("0.0.0.0", port),
@@ -90,10 +106,46 @@ def start_health_server():
 
 
 # ============================================================
+# تسجيل / تحديث مستخدم Telegram
+# ============================================================
+
+def register_user(update: Update):
+
+    if not update.effective_user:
+        return
+
+    telegram_user = update.effective_user
+
+    try:
+
+        create_or_update_user(
+            telegram_id=telegram_user.id,
+            username=telegram_user.username,
+            first_name=telegram_user.first_name,
+        )
+
+        logger.info(
+            "User registered/updated: %s",
+            telegram_user.id,
+        )
+
+    except Exception:
+
+        logger.exception(
+            "Could not register/update user"
+        )
+
+
+# ============================================================
 # أمر البداية
 # ============================================================
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    register_user(update)
 
     message = (
         "🤖 أهلاً بك في SanadAI\n\n"
@@ -109,7 +161,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "أرسل ما تريد تحليله وسأحاول مساعدتك."
     )
 
-    await update.message.reply_text(message)
+    await update.message.reply_text(
+        message
+    )
 
 
 # ============================================================
@@ -131,6 +185,7 @@ async def check_gemini():
 async def run_gemini(contents):
 
     if gemini_client is None:
+
         raise RuntimeError(
             "GEMINI_API_KEY غير موجود."
         )
@@ -142,7 +197,9 @@ async def run_gemini(contents):
             contents=contents,
         )
 
-    return await asyncio.to_thread(generate)
+    return await asyncio.to_thread(
+        generate
+    )
 
 
 # ============================================================
@@ -153,6 +210,8 @@ async def handle_message(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
+
+    register_user(update)
 
     try:
 
@@ -168,13 +227,16 @@ async def handle_message(
         answer = response.text
 
         if not answer:
-            answer = "⚠️ لم أستطع الحصول على إجابة."
+
+            answer = (
+                "⚠️ لم أستطع الحصول على إجابة."
+            )
 
         await update.message.reply_text(
             answer
         )
 
-    except Exception as e:
+    except Exception:
 
         logger.exception(
             "Text processing error"
@@ -194,6 +256,8 @@ async def handle_photo(
     context: ContextTypes.DEFAULT_TYPE,
 ):
 
+    register_user(update)
+
     try:
 
         await update.message.reply_text(
@@ -207,7 +271,9 @@ async def handle_photo(
             photo.file_id
         )
 
-        image_bytes = await telegram_file.download_as_bytearray()
+        image_bytes = (
+            await telegram_file.download_as_bytearray()
+        )
 
         user_text = (
             update.message.caption
@@ -216,10 +282,12 @@ async def handle_photo(
         )
 
         contents = [
+
             types.Part.from_bytes(
                 data=bytes(image_bytes),
                 mime_type="image/jpeg",
             ),
+
             user_text,
         ]
 
@@ -230,13 +298,16 @@ async def handle_photo(
         answer = response.text
 
         if not answer:
-            answer = "⚠️ لم أستطع تحليل الصورة."
+
+            answer = (
+                "⚠️ لم أستطع تحليل الصورة."
+            )
 
         await update.message.reply_text(
             answer
         )
 
-    except Exception as e:
+    except Exception:
 
         logger.exception(
             "Image processing error"
@@ -271,7 +342,6 @@ SUPPORTED_DOCUMENTS = {
 
     ".txt":
         "text/plain",
-
 }
 
 
@@ -284,6 +354,8 @@ async def handle_document(
     context: ContextTypes.DEFAULT_TYPE,
 ):
 
+    register_user(update)
+
     temp_path = None
     uploaded_file = None
 
@@ -294,7 +366,11 @@ async def handle_document(
         if document is None:
             return
 
-        file_name = document.file_name or "file"
+        file_name = (
+            document.file_name
+            or
+            "file"
+        )
 
         extension = os.path.splitext(
             file_name
@@ -330,7 +406,10 @@ async def handle_document(
 
             icon = "📝"
 
-        elif extension in [".xlsx", ".xls"]:
+        elif extension in [
+            ".xlsx",
+            ".xls"
+        ]:
 
             icon = "📊"
 
@@ -352,7 +431,12 @@ async def handle_document(
             document.file_id
         )
 
-        suffix = extension if extension else ".tmp"
+        suffix = (
+            extension
+            if extension
+            else
+            ".tmp"
+        )
 
         with tempfile.NamedTemporaryFile(
             delete=False,
@@ -386,8 +470,10 @@ async def handle_document(
             "استخرج أهم المعلومات والحقائق والأرقام، "
             "وأجب عن أي سؤال مرتبط بمحتواه. "
             "إذا كان هناك تناقض أو خطأ واضح في الملف، "
-            "اذكره وصححه. "
+            "اذكره بوضوح. "
             "إذا كان الملف جدولًا، فحلل البيانات الموجودة فيه. "
+            "فرّق بين الحقائق والحسابات والاستنتاجات. "
+            "لا تفترض سببًا أو معلومة غير موجودة في الملف. "
             "قدّم الإجابة باللغة العربية ما لم يطلب المستخدم لغة أخرى."
         )
 
@@ -397,7 +483,11 @@ async def handle_document(
 
         file_part = types.Part.from_uri(
             file_uri=uploaded_file.uri,
-            mime_type=uploaded_file.mime_type or mime_type,
+            mime_type=(
+                uploaded_file.mime_type
+                or
+                mime_type
+            ),
         )
 
         response = await run_gemini(
@@ -420,7 +510,7 @@ async def handle_document(
             answer
         )
 
-    except Exception as e:
+    except Exception:
 
         logger.exception(
             "Document processing error"
@@ -437,8 +527,13 @@ async def handle_document(
 
             try:
 
-                if os.path.exists(temp_path):
-                    os.remove(temp_path)
+                if os.path.exists(
+                    temp_path
+                ):
+
+                    os.remove(
+                        temp_path
+                    )
 
             except Exception:
 
@@ -465,7 +560,29 @@ def main():
             "GEMINI_API_KEY غير موجود."
         )
 
+    # --------------------------------------------------------
+    # تهيئة قاعدة البيانات
+    # --------------------------------------------------------
+
+    try:
+
+        init_database()
+
+        logger.info(
+            "Database initialized successfully."
+        )
+
+    except Exception:
+
+        logger.exception(
+            "Database initialization failed."
+        )
+
+        raise
+
+    # --------------------------------------------------------
     # تشغيل خادم Render في الخلفية
+    # --------------------------------------------------------
 
     health_thread = threading.Thread(
         target=start_health_server,
@@ -474,7 +591,9 @@ def main():
 
     health_thread.start()
 
+    # --------------------------------------------------------
     # إنشاء تطبيق Telegram
+    # --------------------------------------------------------
 
     application = (
         Application.builder()
@@ -482,7 +601,9 @@ def main():
         .build()
     )
 
-    # الأوامر
+    # --------------------------------------------------------
+    # أمر البداية
+    # --------------------------------------------------------
 
     application.add_handler(
         CommandHandler(
@@ -491,7 +612,9 @@ def main():
         )
     )
 
+    # --------------------------------------------------------
     # الصور
+    # --------------------------------------------------------
 
     application.add_handler(
         MessageHandler(
@@ -500,7 +623,9 @@ def main():
         )
     )
 
+    # --------------------------------------------------------
     # جميع الملفات
+    # --------------------------------------------------------
 
     application.add_handler(
         MessageHandler(
@@ -509,7 +634,9 @@ def main():
         )
     )
 
+    # --------------------------------------------------------
     # الرسائل النصية
+    # --------------------------------------------------------
 
     application.add_handler(
         MessageHandler(
@@ -530,4 +657,5 @@ def main():
 # ============================================================
 
 if __name__ == "__main__":
+
     main()
