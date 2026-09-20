@@ -26,6 +26,8 @@ from database import (
     increment_questions_used,
     get_user_stats,
     deactivate_expired_subscription,
+    create_payment,
+    get_payment_by_txid,
 )
 
 
@@ -277,19 +279,205 @@ async def send_subscription_message(
     update: Update,
 ):
 
+    wallet = (
+        PAYMENT_WALLET
+        or
+        "عنوان الدفع غير مضبوط حاليًا."
+    )
+
     message = (
-        "🔒 انتهت الأسئلة المجانية الثلاثة.\n\n"
-        "للاستمرار في استخدام SanadAI، "
-        f"الاشتراك الحالي هو {SUBSCRIPTION_PRICE_USDT} USDT "
-        f"لمدة {SUBSCRIPTION_DAYS} يومًا.\n\n"
-        "💳 سيتم تفعيل نظام الدفع والتحقق من المعاملة "
-        "في المرحلة التالية.\n\n"
-        "⏳ نظام الدفع لم يُفعّل بعد."
+        "💳 اشتراك SanadAI\n\n"
+        f"💰 السعر: {SUBSCRIPTION_PRICE_USDT} USDT\n"
+        f"📅 المدة: {SUBSCRIPTION_DAYS} يومًا\n"
+        "🌐 الشبكة: TRON (TRC20)\n"
+        "🪙 العملة: USDT\n\n"
+        "📥 عنوان الدفع:\n"
+        f"{wallet}\n\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        "بعد إتمام التحويل، أرسل رقم المعاملة TXID بهذا الشكل:\n\n"
+        "/pay TXID\n\n"
+        "⏳ سيتم تسجيل المعاملة وانتظار التحقق منها.\n"
+        "⚠️ لن يتم تفعيل الاشتراك قبل التحقق الحقيقي من المعاملة.\n\n"
+        "🔐 لا ترسل أبدًا المفتاح الخاص لمحفظتك."
     )
 
     await update.message.reply_text(
         message
     )
+
+
+# ============================================================
+# أمر الاشتراك
+# ============================================================
+
+async def subscribe(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    register_user(update)
+
+    await send_subscription_message(
+        update
+    )
+
+
+# ============================================================
+# استقبال TXID
+# الاستخدام: /pay TXID
+# ============================================================
+
+async def pay(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    register_user(update)
+
+    if not update.effective_user:
+        return
+
+    telegram_id = update.effective_user.id
+
+    # --------------------------------------------------------
+    # التأكد من وجود TXID
+    # --------------------------------------------------------
+
+    if not context.args:
+
+        await update.message.reply_text(
+            "🧾 لإرسال رقم المعاملة استخدم:\n\n"
+            "/pay TXID\n\n"
+            "مثال:\n"
+            "/pay 64_character_transaction_hash"
+        )
+
+        return
+
+    if len(context.args) != 1:
+
+        await update.message.reply_text(
+            "⚠️ أرسل TXID واحدًا فقط.\n\n"
+            "الاستخدام الصحيح:\n"
+            "/pay TXID"
+        )
+
+        return
+
+    txid = context.args[0].strip()
+
+    # --------------------------------------------------------
+    # فحص مبدئي لشكل TXID
+    # --------------------------------------------------------
+
+    if len(txid) != 64:
+
+        await update.message.reply_text(
+            "⚠️ يبدو أن TXID غير صحيح.\n\n"
+            "TXID الخاص بمعاملات TRON يجب أن يكون بطول 64 حرفًا."
+        )
+
+        return
+
+    try:
+
+        int(
+            txid,
+            16
+        )
+
+    except ValueError:
+
+        await update.message.reply_text(
+            "⚠️ TXID غير صالح.\n\n"
+            "يجب أن يحتوي TXID على أحرف وأرقام سداسية عشرية فقط."
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # فحص وجود TXID مسبقًا
+    # --------------------------------------------------------
+
+    try:
+
+        existing_payment = await asyncio.to_thread(
+            get_payment_by_txid,
+            txid,
+        )
+
+        if existing_payment:
+
+            existing_user_id = existing_payment.get(
+                "telegram_id"
+            )
+
+            if existing_user_id == telegram_id:
+
+                await update.message.reply_text(
+                    "ℹ️ هذه المعاملة مسجلة لديك بالفعل.\n\n"
+                    f"🧾 TXID:\n{txid}\n\n"
+                    "⏳ حالتها الحالية بانتظار التحقق."
+                )
+
+            else:
+
+                await update.message.reply_text(
+                    "⚠️ هذه المعاملة مسجلة مسبقًا في النظام."
+                )
+
+            return
+
+        # ----------------------------------------------------
+        # تسجيل الدفع كـ pending
+        # ----------------------------------------------------
+
+        payment = await asyncio.to_thread(
+            create_payment,
+            telegram_id,
+            txid,
+            SUBSCRIPTION_PRICE_USDT,
+            PAYMENT_WALLET or "",
+            "TRON",
+            "USDT",
+        )
+
+        if not payment:
+
+            await update.message.reply_text(
+                "⚠️ لم يتم تسجيل المعاملة.\n"
+                "قد تكون مسجلة مسبقًا."
+            )
+
+            return
+
+        await update.message.reply_text(
+            "✅ تم استلام بيانات المعاملة.\n\n"
+            f"🧾 TXID:\n{txid}\n\n"
+            "💰 المبلغ المتوقع: "
+            f"{SUBSCRIPTION_PRICE_USDT} USDT\n"
+            "🌐 الشبكة: TRON (TRC20)\n"
+            "⏳ الحالة: بانتظار التحقق\n\n"
+            "🔎 سيتم التحقق من المعاملة قبل تفعيل الاشتراك.\n"
+            "❗ إرسال TXID وحده لا يعني تفعيل الاشتراك."
+        )
+
+        logger.info(
+            "Payment submitted. User=%s TXID=%s",
+            telegram_id,
+            txid,
+        )
+
+    except Exception:
+
+        logger.exception(
+            "Payment submission error"
+        )
+
+        await update.message.reply_text(
+            "⚠️ حدث خطأ أثناء تسجيل المعاملة.\n"
+            "حاول مرة أخرى لاحقًا."
+        )
 
 
 # ============================================================
@@ -387,6 +575,8 @@ async def start(
         "📋 CSV\n"
         "📃 TXT\n\n"
         "🎁 لديك 3 أسئلة مجانية.\n\n"
+        "💳 للاشتراك:\n"
+        "/subscribe\n\n"
         "أرسل ما تريد تحليله وسأحاول مساعدتك."
     )
 
@@ -409,7 +599,6 @@ async def users(
 
     telegram_id = update.effective_user.id
 
-    # حماية الأمر الإداري
     if telegram_id != OWNER_TELEGRAM_ID:
 
         logger.warning(
@@ -502,10 +691,6 @@ async def user_details(
 
     owner_id = update.effective_user.id
 
-    # --------------------------------------------------------
-    # حماية الأمر
-    # --------------------------------------------------------
-
     if owner_id != OWNER_TELEGRAM_ID:
 
         logger.warning(
@@ -518,10 +703,6 @@ async def user_details(
         )
 
         return
-
-    # --------------------------------------------------------
-    # التحقق من وجود Telegram ID
-    # --------------------------------------------------------
 
     if not context.args:
 
@@ -546,10 +727,6 @@ async def user_details(
 
     target_id_text = context.args[0]
 
-    # --------------------------------------------------------
-    # تحويل Telegram ID إلى رقم
-    # --------------------------------------------------------
-
     try:
 
         target_telegram_id = int(
@@ -565,10 +742,6 @@ async def user_details(
         )
 
         return
-
-    # --------------------------------------------------------
-    # البحث عن المستخدم
-    # --------------------------------------------------------
 
     try:
 
@@ -586,10 +759,6 @@ async def user_details(
             )
 
             return
-
-        # ----------------------------------------------------
-        # بيانات المستخدم
-        # ----------------------------------------------------
 
         username = user.get(
             "username"
@@ -617,10 +786,6 @@ async def user_details(
             "created_at"
         )
 
-        # ----------------------------------------------------
-        # التحقق الحقيقي من حالة الاشتراك
-        # ----------------------------------------------------
-
         actual_subscription_active = False
 
         if subscription_active:
@@ -639,10 +804,6 @@ async def user_details(
                     deactivate_expired_subscription,
                     target_telegram_id,
                 )
-
-        # ----------------------------------------------------
-        # البيانات المعروضة
-        # ----------------------------------------------------
 
         if actual_subscription_active:
 
@@ -1286,6 +1447,20 @@ def main():
         CommandHandler(
             "start",
             start,
+        )
+    )
+
+    application.add_handler(
+        CommandHandler(
+            "subscribe",
+            subscribe,
+        )
+    )
+
+    application.add_handler(
+        CommandHandler(
+            "pay",
+            pay,
         )
     )
 
