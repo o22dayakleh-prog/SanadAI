@@ -22,6 +22,7 @@ from database import (
     init_database,
     create_or_update_user,
     get_user,
+    increment_questions_used,
 )
 
 
@@ -47,12 +48,19 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 PAYMENT_WALLET = os.getenv("PAYMENT_WALLET")
 SUBSCRIPTION_PRICE_USDT = os.getenv(
     "SUBSCRIPTION_PRICE_USDT",
-    "3"
+    "3",
 )
 SUBSCRIPTION_DAYS = os.getenv(
     "SUBSCRIPTION_DAYS",
-    "30"
+    "30",
 )
+
+
+# ============================================================
+# إعداد الأسئلة المجانية
+# ============================================================
+
+FREE_QUESTIONS = 3
 
 
 # ============================================================
@@ -81,7 +89,7 @@ class HealthHandler(BaseHTTPRequestHandler):
 
         self.send_header(
             "Content-Type",
-            "text/plain"
+            "text/plain",
         )
 
         self.end_headers()
@@ -99,7 +107,7 @@ def start_health_server():
     port = int(
         os.environ.get(
             "PORT",
-            "10000"
+            "10000",
         )
     )
 
@@ -117,19 +125,19 @@ def start_health_server():
 
 
 # ============================================================
-# تسجيل / تحديث مستخدم Telegram
+# تسجيل / تحديث المستخدم
 # ============================================================
 
 def register_user(update: Update):
 
     if not update.effective_user:
-        return
+        return None
 
     telegram_user = update.effective_user
 
     try:
 
-        create_or_update_user(
+        user = create_or_update_user(
             telegram_id=telegram_user.id,
             username=telegram_user.username,
             first_name=telegram_user.first_name,
@@ -140,11 +148,162 @@ def register_user(update: Update):
             telegram_user.id,
         )
 
+        return user
+
     except Exception:
 
         logger.exception(
             "Could not register/update user"
         )
+
+        return None
+
+
+# ============================================================
+# فحص إمكانية استخدام سؤال
+# ============================================================
+
+def can_use_service(telegram_id):
+
+    try:
+
+        user = get_user(
+            telegram_id
+        )
+
+        if not user:
+            return False, None
+
+        subscription_active = user.get(
+            "subscription_active",
+            False,
+        )
+
+        if subscription_active:
+
+            return True, user
+
+        questions_used = user.get(
+            "questions_used",
+            0,
+        )
+
+        if questions_used < FREE_QUESTIONS:
+
+            return True, user
+
+        return False, user
+
+    except Exception:
+
+        logger.exception(
+            "Could not check user usage"
+        )
+
+        return False, None
+
+
+# ============================================================
+# تسجيل استخدام سؤال
+# ============================================================
+
+def consume_question(telegram_id):
+
+    try:
+
+        return increment_questions_used(
+            telegram_id
+        )
+
+    except Exception:
+
+        logger.exception(
+            "Could not increment question counter"
+        )
+
+        return None
+
+
+# ============================================================
+# رسالة الاشتراك
+# ============================================================
+
+async def send_subscription_message(
+    update: Update,
+):
+
+    message = (
+        "🔒 انتهت الأسئلة المجانية الثلاثة.\n\n"
+        "للاستمرار في استخدام SanadAI، "
+        f"الاشتراك الحالي هو {SUBSCRIPTION_PRICE_USDT} USDT "
+        f"لمدة {SUBSCRIPTION_DAYS} يومًا.\n\n"
+        "💳 سيتم تفعيل نظام الدفع والتحقق من المعاملة "
+        "في المرحلة التالية.\n\n"
+        "⏳ نظام الدفع لم يُفعّل بعد."
+    )
+
+    await update.message.reply_text(
+        message
+    )
+
+
+# ============================================================
+# فحص الاستخدام قبل معالجة الطلب
+# ============================================================
+
+async def check_and_consume(
+    update: Update,
+):
+
+    if not update.effective_user:
+        return False
+
+    telegram_id = update.effective_user.id
+
+    allowed, user = await asyncio.to_thread(
+        can_use_service,
+        telegram_id,
+    )
+
+    if not allowed:
+
+        await send_subscription_message(
+            update
+        )
+
+        return False
+
+    # المستخدم المشترك لا يحتاج إلى استهلاك
+    # من الأسئلة المجانية.
+
+    if user and user.get(
+        "subscription_active",
+        False,
+    ):
+
+        return True
+
+    new_count = await asyncio.to_thread(
+        consume_question,
+        telegram_id,
+    )
+
+    if new_count is None:
+
+        await update.message.reply_text(
+            "⚠️ حدث خطأ أثناء تسجيل استخدام السؤال.\n"
+            "حاول مرة أخرى."
+        )
+
+        return False
+
+    logger.info(
+        "Question consumed for user %s. New count: %s",
+        telegram_id,
+        new_count,
+    )
+
+    return True
 
 
 # ============================================================
@@ -169,6 +328,7 @@ async def start(
         "📊 Excel\n"
         "📋 CSV\n"
         "📃 TXT\n\n"
+        "🎁 لديك 3 أسئلة مجانية.\n\n"
         "أرسل ما تريد تحليله وسأحاول مساعدتك."
     )
 
@@ -194,7 +354,7 @@ async def mydb(
 
         user = await asyncio.to_thread(
             get_user,
-            telegram_id
+            telegram_id,
         )
 
         if not user:
@@ -205,16 +365,32 @@ async def mydb(
 
             return
 
-        username = user.get("username") or "غير موجود"
-        first_name = user.get("first_name") or "غير موجود"
-        questions_used = user.get("questions_used", 0)
+        username = (
+            user.get("username")
+            or
+            "غير موجود"
+        )
+
+        first_name = (
+            user.get("first_name")
+            or
+            "غير موجود"
+        )
+
+        questions_used = user.get(
+            "questions_used",
+            0,
+        )
+
         subscription_active = user.get(
             "subscription_active",
-            False
+            False,
         )
+
         subscription_expires_at = user.get(
             "subscription_expires_at"
         )
+
         created_at = user.get(
             "created_at"
         )
@@ -246,12 +422,18 @@ async def mydb(
             "⚪ غير مفعّل"
         )
 
+        remaining = max(
+            FREE_QUESTIONS - questions_used,
+            0,
+        )
+
         message = (
             "🗄️ بيانات حسابك في SanadAI\n\n"
             f"🆔 Telegram ID: {telegram_id}\n"
             f"👤 الاسم: {first_name}\n"
             f"🔹 Username: @{username if username != 'غير موجود' else username}\n"
             f"🔢 الأسئلة المستخدمة: {questions_used}\n"
+            f"🎁 الأسئلة المجانية المتبقية: {remaining}\n"
             f"💳 الاشتراك: {status}\n"
             f"📅 انتهاء الاشتراك: {expires_text}\n"
             f"🕐 تاريخ إنشاء الحساب: {created_text}\n\n"
@@ -274,7 +456,7 @@ async def mydb(
 
 
 # ============================================================
-# تشغيل Gemini بطريقة لا توقف البوت
+# تشغيل Gemini
 # ============================================================
 
 async def run_gemini(contents):
@@ -307,6 +489,13 @@ async def handle_message(
 ):
 
     register_user(update)
+
+    allowed = await check_and_consume(
+        update
+    )
+
+    if not allowed:
+        return
 
     try:
 
@@ -352,6 +541,13 @@ async def handle_photo(
 ):
 
     register_user(update)
+
+    allowed = await check_and_consume(
+        update
+    )
+
+    if not allowed:
+        return
 
     try:
 
@@ -451,6 +647,13 @@ async def handle_document(
 
     register_user(update)
 
+    allowed = await check_and_consume(
+        update
+    )
+
+    if not allowed:
+        return
+
     temp_path = None
     uploaded_file = None
 
@@ -503,7 +706,7 @@ async def handle_document(
 
         elif extension in [
             ".xlsx",
-            ".xls"
+            ".xls",
         ]:
 
             icon = "📊"
@@ -571,10 +774,6 @@ async def handle_document(
             "لا تفترض سببًا أو معلومة غير موجودة في الملف. "
             "قدّم الإجابة باللغة العربية ما لم يطلب المستخدم لغة أخرى."
         )
-
-        # ----------------------------------------------------
-        # إرسال الملف مع الطلب إلى Gemini
-        # ----------------------------------------------------
 
         file_part = types.Part.from_uri(
             file_uri=uploaded_file.uri,
@@ -676,7 +875,7 @@ def main():
         raise
 
     # --------------------------------------------------------
-    # تشغيل خادم Render في الخلفية
+    # تشغيل خادم Render
     # --------------------------------------------------------
 
     health_thread = threading.Thread(
@@ -726,7 +925,7 @@ def main():
     )
 
     # --------------------------------------------------------
-    # جميع الملفات
+    # الملفات
     # --------------------------------------------------------
 
     application.add_handler(
@@ -760,6 +959,6 @@ def main():
 
 if __name__ == "__main__":
 
-    main()                
+    main()
 
     
