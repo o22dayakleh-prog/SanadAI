@@ -21,6 +21,7 @@ from google.genai import types
 from database import (
     init_database,
     create_or_update_user,
+    get_user,
 )
 
 
@@ -44,8 +45,14 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 PAYMENT_WALLET = os.getenv("PAYMENT_WALLET")
-SUBSCRIPTION_PRICE_USDT = os.getenv("SUBSCRIPTION_PRICE_USDT", "3")
-SUBSCRIPTION_DAYS = os.getenv("SUBSCRIPTION_DAYS", "30")
+SUBSCRIPTION_PRICE_USDT = os.getenv(
+    "SUBSCRIPTION_PRICE_USDT",
+    "3"
+)
+SUBSCRIPTION_DAYS = os.getenv(
+    "SUBSCRIPTION_DAYS",
+    "30"
+)
 
 
 # ============================================================
@@ -69,12 +76,16 @@ if GEMINI_API_KEY:
 class HealthHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
+
         self.send_response(200)
+
         self.send_header(
             "Content-Type",
             "text/plain"
         )
+
         self.end_headers()
+
         self.wfile.write(
             b"SanadAI is running."
         )
@@ -167,15 +178,99 @@ async def start(
 
 
 # ============================================================
-# فحص Gemini
+# فحص قاعدة البيانات - مؤقت
 # ============================================================
 
-async def check_gemini():
+async def mydb(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
 
-    if gemini_client is None:
-        return False
+    register_user(update)
 
-    return True
+    try:
+
+        telegram_id = update.effective_user.id
+
+        user = await asyncio.to_thread(
+            get_user,
+            telegram_id
+        )
+
+        if not user:
+
+            await update.message.reply_text(
+                "⚠️ لم يتم العثور على حسابك في قاعدة البيانات."
+            )
+
+            return
+
+        username = user.get("username") or "غير موجود"
+        first_name = user.get("first_name") or "غير موجود"
+        questions_used = user.get("questions_used", 0)
+        subscription_active = user.get(
+            "subscription_active",
+            False
+        )
+        subscription_expires_at = user.get(
+            "subscription_expires_at"
+        )
+        created_at = user.get(
+            "created_at"
+        )
+
+        if subscription_expires_at:
+
+            expires_text = str(
+                subscription_expires_at
+            )
+
+        else:
+
+            expires_text = "لا يوجد"
+
+        if created_at:
+
+            created_text = str(
+                created_at
+            )
+
+        else:
+
+            created_text = "غير معروف"
+
+        status = (
+            "🟢 مفعّل"
+            if subscription_active
+            else
+            "⚪ غير مفعّل"
+        )
+
+        message = (
+            "🗄️ بيانات حسابك في SanadAI\n\n"
+            f"🆔 Telegram ID: {telegram_id}\n"
+            f"👤 الاسم: {first_name}\n"
+            f"🔹 Username: @{username if username != 'غير موجود' else username}\n"
+            f"🔢 الأسئلة المستخدمة: {questions_used}\n"
+            f"💳 الاشتراك: {status}\n"
+            f"📅 انتهاء الاشتراك: {expires_text}\n"
+            f"🕐 تاريخ إنشاء الحساب: {created_text}\n\n"
+            "✅ قاعدة البيانات متصلة وحسابك مسجل."
+        )
+
+        await update.message.reply_text(
+            message
+        )
+
+    except Exception:
+
+        logger.exception(
+            "Database check error"
+        )
+
+        await update.message.reply_text(
+            "⚠️ حدث خطأ أثناء فحص قاعدة البيانات."
+        )
 
 
 # ============================================================
@@ -602,13 +697,20 @@ def main():
     )
 
     # --------------------------------------------------------
-    # أمر البداية
+    # الأوامر
     # --------------------------------------------------------
 
     application.add_handler(
         CommandHandler(
             "start",
             start,
+        )
+    )
+
+    application.add_handler(
+        CommandHandler(
+            "mydb",
+            mydb,
         )
     )
 
@@ -658,4 +760,6 @@ def main():
 
 if __name__ == "__main__":
 
-    main()
+    main()                
+
+    
