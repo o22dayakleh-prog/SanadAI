@@ -18,9 +18,14 @@ def get_connection():
 
 
 def init_database():
-    """Create the users table if it does not already exist."""
+    """Create the database tables if they do not already exist."""
     with get_connection() as conn:
         with conn.cursor() as cur:
+
+            # ====================================================
+            # جدول المستخدمين
+            # ====================================================
+
             cur.execute(
                 """
                 CREATE TABLE IF NOT EXISTS users (
@@ -44,8 +49,71 @@ def init_database():
                 """
             )
 
+            # ====================================================
+            # جدول عمليات الدفع
+            # ====================================================
+
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS payments (
+                    id SERIAL PRIMARY KEY,
+
+                    telegram_id BIGINT NOT NULL,
+
+                    txid TEXT UNIQUE NOT NULL,
+
+                    amount_usdt NUMERIC(20, 6) NOT NULL,
+
+                    recipient_address TEXT NOT NULL,
+
+                    network TEXT NOT NULL DEFAULT 'TRON',
+
+                    token TEXT NOT NULL DEFAULT 'USDT',
+
+                    status TEXT NOT NULL DEFAULT 'pending',
+
+                    confirmations INTEGER NOT NULL DEFAULT 0,
+
+                    transaction_time TIMESTAMPTZ,
+
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+                    verified_at TIMESTAMPTZ
+                );
+                """
+            )
+
+            # ====================================================
+            # فهارس جدول الدفع
+            # ====================================================
+
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_payments_telegram_id
+                ON payments (telegram_id);
+                """
+            )
+
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_payments_status
+                ON payments (status);
+                """
+            )
+
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_payments_txid
+                ON payments (txid);
+                """
+            )
+
         conn.commit()
 
+
+# ============================================================
+# المستخدمون
+# ============================================================
 
 def get_user(telegram_id):
     """Return a user by Telegram ID, or None if the user does not exist."""
@@ -59,11 +127,17 @@ def get_user(telegram_id):
                 """,
                 (telegram_id,)
             )
+
             return cur.fetchone()
 
 
-def create_or_update_user(telegram_id, username=None, first_name=None):
+def create_or_update_user(
+    telegram_id,
+    username=None,
+    first_name=None
+):
     """Create a user if needed, otherwise update their profile information."""
+
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -74,24 +148,33 @@ def create_or_update_user(telegram_id, username=None, first_name=None):
                     first_name
                 )
                 VALUES (%s, %s, %s)
+
                 ON CONFLICT (telegram_id)
+
                 DO UPDATE SET
                     username = EXCLUDED.username,
                     first_name = EXCLUDED.first_name,
                     updated_at = NOW()
+
                 RETURNING *;
                 """,
-                (telegram_id, username, first_name)
+                (
+                    telegram_id,
+                    username,
+                    first_name
+                )
             )
 
             user = cur.fetchone()
 
         conn.commit()
+
         return user
 
 
 def increment_questions_used(telegram_id):
     """Increase the user's question counter by one."""
+
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -101,6 +184,7 @@ def increment_questions_used(telegram_id):
                     questions_used = questions_used + 1,
                     updated_at = NOW()
                 WHERE telegram_id = %s
+
                 RETURNING questions_used;
                 """,
                 (telegram_id,)
@@ -115,6 +199,7 @@ def increment_questions_used(telegram_id):
 
 def reset_questions_used(telegram_id):
     """Reset the user's question counter."""
+
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -131,8 +216,12 @@ def reset_questions_used(telegram_id):
         conn.commit()
 
 
-def activate_subscription(telegram_id, expires_at):
+def activate_subscription(
+    telegram_id,
+    expires_at
+):
     """Activate or extend a user's subscription."""
+
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -144,14 +233,20 @@ def activate_subscription(telegram_id, expires_at):
                     updated_at = NOW()
                 WHERE telegram_id = %s;
                 """,
-                (expires_at, telegram_id)
+                (
+                    expires_at,
+                    telegram_id
+                )
             )
 
         conn.commit()
 
 
-def deactivate_expired_subscription(telegram_id):
+def deactivate_expired_subscription(
+    telegram_id
+):
     """Deactivate a subscription that has expired."""
+
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -172,6 +267,7 @@ def deactivate_expired_subscription(telegram_id):
 
 def get_user_stats():
     """Return overall user statistics."""
+
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -195,9 +291,183 @@ def get_user_stats():
                           AND questions_used < 3
                     ) AS free_users_remaining,
 
-                    COALESCE(SUM(questions_used), 0) AS total_questions_used
+                    COALESCE(
+                        SUM(questions_used),
+                        0
+                    ) AS total_questions_used
 
                 FROM users;
+                """
+            )
+
+            return cur.fetchone()
+
+
+# ============================================================
+# عمليات الدفع
+# ============================================================
+
+def create_payment(
+    telegram_id,
+    txid,
+    amount_usdt,
+    recipient_address,
+    network="TRON",
+    token="USDT"
+):
+    """
+    Create a payment record.
+
+    TXID is unique, so the same transaction
+    cannot be registered twice.
+    """
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+
+            cur.execute(
+                """
+                INSERT INTO payments (
+                    telegram_id,
+                    txid,
+                    amount_usdt,
+                    recipient_address,
+                    network,
+                    token
+                )
+                VALUES (
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s
+                )
+
+                ON CONFLICT (txid)
+                DO NOTHING
+
+                RETURNING *;
+                """,
+                (
+                    telegram_id,
+                    txid,
+                    amount_usdt,
+                    recipient_address,
+                    network,
+                    token
+                )
+            )
+
+            payment = cur.fetchone()
+
+        conn.commit()
+
+        return payment
+
+
+def get_payment_by_txid(txid):
+    """Return a payment by TXID."""
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT *
+                FROM payments
+                WHERE txid = %s;
+                """,
+                (txid,)
+            )
+
+            return cur.fetchone()
+
+
+def get_user_payments(telegram_id):
+    """Return all payments belonging to a user."""
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT *
+                FROM payments
+                WHERE telegram_id = %s
+                ORDER BY created_at DESC;
+                """,
+                (telegram_id,)
+            )
+
+            return cur.fetchall()
+
+
+def update_payment_status(
+    txid,
+    status,
+    confirmations=0,
+    transaction_time=None
+):
+    """Update payment verification status."""
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE payments
+                SET
+                    status = %s,
+                    confirmations = %s,
+                    transaction_time = %s,
+                    verified_at = CASE
+                        WHEN %s = 'verified'
+                        THEN NOW()
+                        ELSE verified_at
+                    END
+                WHERE txid = %s;
+                """,
+                (
+                    status,
+                    confirmations,
+                    transaction_time,
+                    status,
+                    txid
+                )
+            )
+
+        conn.commit()
+
+
+def get_payment_stats():
+    """Return payment statistics."""
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    COUNT(*) AS total_payments,
+
+                    COUNT(*) FILTER (
+                        WHERE status = 'verified'
+                    ) AS verified_payments,
+
+                    COUNT(*) FILTER (
+                        WHERE status = 'pending'
+                    ) AS pending_payments,
+
+                    COUNT(*) FILTER (
+                        WHERE status = 'rejected'
+                    ) AS rejected_payments,
+
+                    COALESCE(
+                        SUM(amount_usdt)
+                        FILTER (
+                            WHERE status = 'verified'
+                        ),
+                        0
+                    ) AS verified_amount_usdt
+
+                FROM payments;
                 """
             )
 
