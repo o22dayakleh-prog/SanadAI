@@ -1,13 +1,16 @@
 import os
 import logging
-import threading
 import tempfile
 import asyncio
 from datetime import datetime, timezone, timedelta
 
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    CopyTextButton,
+)
 
-from telegram import Update
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -52,9 +55,13 @@ logger = logging.getLogger(__name__)
 # ============================================================
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-PAYMENT_WALLET = os.getenv("PAYMENT_WALLET")
+PAYMENT_WALLET = os.getenv(
+    "PAYMENT_WALLET",
+    "",
+).strip()
 
 SUBSCRIPTION_PRICE_USDT = os.getenv(
     "SUBSCRIPTION_PRICE_USDT",
@@ -75,6 +82,22 @@ OWNER_TELEGRAM_ID = int(
 
 
 # ============================================================
+# إعداد Webhook الخاص بـ Render
+# ============================================================
+
+RENDER_EXTERNAL_URL = os.getenv(
+    "RENDER_EXTERNAL_URL",
+    "https://sanadai-bot.onrender.com",
+).rstrip("/")
+
+WEBHOOK_PATH = "telegram"
+
+WEBHOOK_URL = (
+    f"{RENDER_EXTERNAL_URL}/{WEBHOOK_PATH}"
+)
+
+
+# ============================================================
 # إعداد الأسئلة المجانية
 # ============================================================
 
@@ -90,56 +113,10 @@ GEMINI_MODEL = "gemini-3.6-flash"
 gemini_client = None
 
 if GEMINI_API_KEY:
+
     gemini_client = genai.Client(
         api_key=GEMINI_API_KEY
     )
-
-
-# ============================================================
-# خادم الصحة الخاص بـ Render
-# ============================================================
-
-class HealthHandler(BaseHTTPRequestHandler):
-
-    def do_GET(self):
-
-        self.send_response(200)
-
-        self.send_header(
-            "Content-Type",
-            "text/plain",
-        )
-
-        self.end_headers()
-
-        self.wfile.write(
-            b"SanadAI is running."
-        )
-
-    def log_message(self, format, *args):
-        return
-
-
-def start_health_server():
-
-    port = int(
-        os.environ.get(
-            "PORT",
-            "10000",
-        )
-    )
-
-    server = HTTPServer(
-        ("0.0.0.0", port),
-        HealthHandler,
-    )
-
-    logger.info(
-        "Health server started on port %s",
-        port,
-    )
-
-    server.serve_forever()
 
 
 # ============================================================
@@ -192,7 +169,12 @@ def can_use_service(telegram_id):
         if not user:
             return False, None
 
+        # ----------------------------------------------------
+        # المالك لديه وصول كامل
+        # ----------------------------------------------------
+
         if telegram_id == OWNER_TELEGRAM_ID:
+
             return True, user
 
         subscription_active = user.get(
@@ -203,6 +185,10 @@ def can_use_service(telegram_id):
         subscription_expires_at = user.get(
             "subscription_expires_at"
         )
+
+        # ----------------------------------------------------
+        # التحقق من انتهاء الاشتراك
+        # ----------------------------------------------------
 
         if subscription_active:
 
@@ -218,9 +204,17 @@ def can_use_service(telegram_id):
 
                 subscription_active = False
 
+        # ----------------------------------------------------
+        # الاشتراك الفعال
+        # ----------------------------------------------------
+
         if subscription_active:
 
             return True, user
+
+        # ----------------------------------------------------
+        # الأسئلة المجانية
+        # ----------------------------------------------------
 
         questions_used = user.get(
             "questions_used",
@@ -249,6 +243,7 @@ def can_use_service(telegram_id):
 def consume_question(telegram_id):
 
     if telegram_id == OWNER_TELEGRAM_ID:
+
         return 0
 
     try:
@@ -288,7 +283,7 @@ async def send_subscription_message(
         "🪙 العملة: USDT\n\n"
         "📥 عنوان الدفع:\n"
         f"<code>{wallet}</code>\n\n"
-        "👆 اضغط على عنوان المحفظة لنسخه بسهولة.\n\n"
+        "اضغط على زر النسخ لنسخ عنوان المحفظة.\n\n"
         "━━━━━━━━━━━━━━━━━━\n\n"
         "بعد إتمام التحويل، أرسل رقم المعاملة TXID بهذا الشكل:\n\n"
         "/pay TXID\n\n"
@@ -296,9 +291,27 @@ async def send_subscription_message(
         "🔐 لا ترسل أبدًا المفتاح الخاص لمحفظتك."
     )
 
+    # --------------------------------------------------------
+    # زر نسخ عنوان المحفظة
+    # --------------------------------------------------------
+
+    reply_markup = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "📋 نسخ عنوان الدفع",
+                    copy_text=CopyTextButton(
+                        text=wallet
+                    ),
+                )
+            ]
+        ]
+    )
+
     await update.message.reply_text(
         message,
         parse_mode="HTML",
+        reply_markup=reply_markup,
     )
 
 
@@ -482,7 +495,10 @@ async def pay(
 
         if not payment:
 
+            # ------------------------------------------------
             # حماية إضافية من سباق الطلبات
+            # ------------------------------------------------
+
             existing_payment = await asyncio.to_thread(
                 get_payment_by_txid,
                 txid,
@@ -651,6 +667,10 @@ async def check_and_consume(
 
     telegram_id = update.effective_user.id
 
+    # --------------------------------------------------------
+    # المالك لديه وصول كامل
+    # --------------------------------------------------------
+
     if telegram_id == OWNER_TELEGRAM_ID:
 
         logger.info(
@@ -659,6 +679,10 @@ async def check_and_consume(
         )
 
         return True
+
+    # --------------------------------------------------------
+    # فحص المستخدم
+    # --------------------------------------------------------
 
     allowed, user = await asyncio.to_thread(
         can_use_service,
@@ -673,6 +697,10 @@ async def check_and_consume(
 
         return False
 
+    # --------------------------------------------------------
+    # فحص الاشتراك
+    # --------------------------------------------------------
+
     subscription_active = (
         user.get(
             "subscription_active",
@@ -685,6 +713,10 @@ async def check_and_consume(
     if subscription_active:
 
         return True
+
+    # --------------------------------------------------------
+    # استهلاك سؤال مجاني
+    # --------------------------------------------------------
 
     new_count = await asyncio.to_thread(
         consume_question,
@@ -1144,11 +1176,19 @@ async def mydb(
             0,
         )
 
+        if username != "غير موجود":
+
+            username_text = f"@{username}"
+
+        else:
+
+            username_text = username
+
         message = (
             "🗄️ بيانات حسابك في SanadAI\n\n"
             f"🆔 Telegram ID: {telegram_id}\n"
             f"👤 الاسم: {first_name}\n"
-            f"🔹 Username: @{username if username != 'غير موجود' else username}\n"
+            f"🔹 Username: {username_text}\n"
             f"🔢 الأسئلة المستخدمة: {questions_used}\n"
             f"🎁 الأسئلة المجانية المتبقية: {remaining}\n"
             f"💳 الاشتراك: {status}\n"
@@ -1555,6 +1595,10 @@ async def handle_document(
 
 def main():
 
+    # --------------------------------------------------------
+    # التحقق من المتغيرات الأساسية
+    # --------------------------------------------------------
+
     if not TELEGRAM_BOT_TOKEN:
 
         raise RuntimeError(
@@ -1566,6 +1610,10 @@ def main():
         raise RuntimeError(
             "GEMINI_API_KEY غير موجود."
         )
+
+    # --------------------------------------------------------
+    # تهيئة قاعدة البيانات
+    # --------------------------------------------------------
 
     try:
 
@@ -1583,18 +1631,19 @@ def main():
 
         raise
 
-    health_thread = threading.Thread(
-        target=start_health_server,
-        daemon=True,
-    )
-
-    health_thread.start()
+    # --------------------------------------------------------
+    # إنشاء التطبيق
+    # --------------------------------------------------------
 
     application = (
         Application.builder()
         .token(TELEGRAM_BOT_TOKEN)
         .build()
     )
+
+    # --------------------------------------------------------
+    # أوامر Telegram
+    # --------------------------------------------------------
 
     application.add_handler(
         CommandHandler(
@@ -1638,12 +1687,20 @@ def main():
         )
     )
 
+    # --------------------------------------------------------
+    # الصور
+    # --------------------------------------------------------
+
     application.add_handler(
         MessageHandler(
             filters.PHOTO,
             handle_photo,
         )
     )
+
+    # --------------------------------------------------------
+    # الملفات
+    # --------------------------------------------------------
 
     application.add_handler(
         MessageHandler(
@@ -1652,6 +1709,10 @@ def main():
         )
     )
 
+    # --------------------------------------------------------
+    # الرسائل النصية
+    # --------------------------------------------------------
+
     application.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND,
@@ -1659,11 +1720,44 @@ def main():
         )
     )
 
-    logger.info(
-        "SanadAI bot is starting..."
+    # --------------------------------------------------------
+    # تشغيل Webhook على Render
+    # --------------------------------------------------------
+
+    port = int(
+        os.environ.get(
+            "PORT",
+            "10000",
+        )
     )
 
-    application.run_polling()
+    logger.info(
+        "SanadAI bot is starting with Webhook..."
+    )
+
+    logger.info(
+        "Render external URL: %s",
+        RENDER_EXTERNAL_URL,
+    )
+
+    logger.info(
+        "Webhook URL: %s",
+        WEBHOOK_URL,
+    )
+
+    logger.info(
+        "Webhook port: %s",
+        port,
+    )
+
+    application.run_webhook(
+        listen="0.0.0.0",
+        port=port,
+        url_path=WEBHOOK_PATH,
+        webhook_url=WEBHOOK_URL,
+        allowed_updates=Update.ALL_TYPES,
+        drop_pending_updates=False,
+    )
 
 
 # ============================================================
@@ -1673,4 +1767,3 @@ def main():
 if __name__ == "__main__":
 
     main()
-
