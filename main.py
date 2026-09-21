@@ -1,9 +1,11 @@
 import os
 import logging
+import threading
 import tempfile
 import asyncio
-import time
 from datetime import datetime, timezone, timedelta
+
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from telegram import Update
 from telegram.ext import (
@@ -94,20 +96,50 @@ if GEMINI_API_KEY:
 
 
 # ============================================================
-# إعداد Telegram Webhook على Render
+# خادم الصحة الخاص بـ Render
 # ============================================================
 
-RENDER_EXTERNAL_URL = os.getenv(
-    "RENDER_EXTERNAL_URL",
-    "https://sanadai-bot.onrender.com",
-).rstrip("/")
+class HealthHandler(BaseHTTPRequestHandler):
 
-WEBHOOK_PATH = "/telegram"
+    def do_GET(self):
 
-WEBHOOK_URL = (
-    f"{RENDER_EXTERNAL_URL}"
-    f"{WEBHOOK_PATH}"
-)
+        self.send_response(200)
+
+        self.send_header(
+            "Content-Type",
+            "text/plain",
+        )
+
+        self.end_headers()
+
+        self.wfile.write(
+            b"SanadAI is running."
+        )
+
+    def log_message(self, format, *args):
+        return
+
+
+def start_health_server():
+
+    port = int(
+        os.environ.get(
+            "PORT",
+            "10000",
+        )
+    )
+
+    server = HTTPServer(
+        ("0.0.0.0", port),
+        HealthHandler,
+    )
+
+    logger.info(
+        "Health server started on port %s",
+        port,
+    )
+
+    server.serve_forever()
 
 
 # ============================================================
@@ -187,6 +219,7 @@ def can_use_service(telegram_id):
                 subscription_active = False
 
         if subscription_active:
+
             return True, user
 
         questions_used = user.get(
@@ -195,6 +228,7 @@ def can_use_service(telegram_id):
         )
 
         if questions_used < FREE_QUESTIONS:
+
             return True, user
 
         return False, user
@@ -302,57 +336,43 @@ async def pay(
     telegram_id = update.effective_user.id
 
     if not context.args:
-
         await update.message.reply_text(
             "🧾 لإرسال رقم المعاملة استخدم:\n\n"
             "/pay TXID\n\n"
             "مثال:\n"
             "/pay 64_character_transaction_hash"
         )
-
         return
 
     if len(context.args) != 1:
-
         await update.message.reply_text(
             "⚠️ أرسل TXID واحدًا فقط.\n\n"
             "الاستخدام الصحيح:\n"
             "/pay TXID"
         )
-
         return
 
     txid = context.args[0].strip()
 
     if len(txid) != 64:
-
         await update.message.reply_text(
             "⚠️ يبدو أن TXID غير صحيح.\n\n"
             "TXID الخاص بمعاملات TRON يجب أن يكون بطول 64 حرفًا."
         )
-
         return
 
     try:
-
-        int(
-            txid,
-            16
-        )
-
+        int(txid, 16)
     except ValueError:
-
         await update.message.reply_text(
             "⚠️ TXID غير صالح.\n\n"
             "يجب أن يحتوي TXID على أحرف وأرقام سداسية عشرية فقط."
         )
-
         return
 
     try:
-
         # ----------------------------------------------------
-        # منع إعادة استخدام TXID
+        # فحص المعاملة المسجلة مسبقًا
         # ----------------------------------------------------
 
         existing_payment = await asyncio.to_thread(
@@ -361,49 +381,36 @@ async def pay(
         )
 
         if existing_payment:
+            existing_user_id = existing_payment.get("telegram_id")
+            status = existing_payment.get("status")
 
-            existing_user_id = existing_payment.get(
-                "telegram_id"
-            )
+            # المعاملة تخص مستخدمًا آخر
+            if existing_user_id != telegram_id:
+                await update.message.reply_text(
+                    "⚠️ هذه المعاملة مسجلة مسبقًا في النظام."
+                )
+                return
 
-            status = existing_payment.get(
-                "status"
-            )
-
-            if (
-                existing_user_id == telegram_id
-                and status == "verified"
-            ):
-
+            # المعاملة تحققت سابقًا
+            if status == "verified":
                 await update.message.reply_text(
                     "ℹ️ هذه المعاملة تم التحقق منها وتفعيلها سابقًا.\n\n"
                     f"🧾 TXID:\n{txid}"
                 )
+                return
 
-            elif existing_user_id == telegram_id:
-
-                await update.message.reply_text(
-                    "ℹ️ هذه المعاملة مسجلة لديك بالفعل.\n\n"
-                    f"🧾 TXID:\n{txid}\n"
-                    f"⏳ الحالة الحالية: {status}"
-                )
-
-            else:
-
-                await update.message.reply_text(
-                    "⚠️ هذه المعاملة مسجلة مسبقًا في النظام."
-                )
-
-            return
-
-        # ----------------------------------------------------
-        # إعلام المستخدم ببدء التحقق
-        # ----------------------------------------------------
-
-        await update.message.reply_text(
-            "🔎 جارٍ التحقق من المعاملة على شبكة TRON...\n"
-            "⏳ قد يستغرق الفحص بضع ثوانٍ."
-        )
+            # pending / rejected: نكمل إلى إعادة التحقق على الشبكة
+            await update.message.reply_text(
+                "🔄 هذه المعاملة مسجلة سابقًا ولكن لم يتم اعتمادها بعد.\n"
+                "🔎 سأعيد التحقق منها على شبكة TRON...\n"
+                "⏳ قد يستغرق الفحص بضع ثوانٍ."
+            )
+        else:
+            # معاملة جديدة
+            await update.message.reply_text(
+                "🔎 جارٍ التحقق من المعاملة على شبكة TRON...\n"
+                "⏳ قد يستغرق الفحص بضع ثوانٍ."
+            )
 
         # ----------------------------------------------------
         # التحقق الحقيقي من البلوكشين
@@ -415,88 +422,95 @@ async def pay(
         )
 
         if not verified.get("verified"):
-
             raise PaymentVerificationError(
                 "Transaction verification failed."
             )
 
-        actual_amount = verified.get(
-            "amount_usdt"
-        )
-
-        sender_address = verified.get(
-            "sender_address"
-        )
-
-        recipient_address = verified.get(
-            "recipient_address"
-        )
+        actual_amount = verified.get("amount_usdt")
+        sender_address = verified.get("sender_address")
+        recipient_address = verified.get("recipient_address")
 
         # ----------------------------------------------------
-        # تسجيل المعاملة بعد نجاح التحقق
-        # ----------------------------------------------------
-
-        payment = await asyncio.to_thread(
-            create_payment,
-            telegram_id,
-            txid,
-            str(actual_amount),
-            recipient_address or PAYMENT_WALLET or "",
-            "TRON",
-            "USDT",
-        )
-
-        if not payment:
-
-            # حماية إضافية من سباق الطلبات
-
-            existing_payment = await asyncio.to_thread(
-                get_payment_by_txid,
-                txid,
-            )
-
-            if existing_payment:
-
-                await update.message.reply_text(
-                    "ℹ️ هذه المعاملة تم تسجيلها مسبقًا."
-                )
-
-                return
-
-            raise PaymentVerificationError(
-                "Could not save verified payment."
-            )
-
-        # ----------------------------------------------------
-        # تحديث حالة الدفع إلى verified
+        # وقت المعاملة
         # ----------------------------------------------------
 
         transaction_time = None
-
-        block_timestamp = verified.get(
-            "block_timestamp"
-        )
+        block_timestamp = verified.get("block_timestamp")
 
         if block_timestamp:
-
             try:
-
                 transaction_time = datetime.fromtimestamp(
                     int(block_timestamp) / 1000,
                     tz=timezone.utc,
                 )
-
             except Exception:
-
                 transaction_time = None
 
-        await asyncio.to_thread(
-            update_payment_status,
-            txid,
-            "verified",
-            1,
-            transaction_time,
-        )
+        # ----------------------------------------------------
+        # حفظ المعاملة أو تحديث السجل الموجود
+        # ----------------------------------------------------
+
+        if existing_payment:
+            # السجل موجود مسبقًا بحالة pending/rejected، لذلك
+            # نحدّث حالته بدل إنشاء سجل دفع مكرر.
+            await asyncio.to_thread(
+                update_payment_status,
+                txid,
+                "verified",
+                1,
+                transaction_time,
+            )
+        else:
+            payment = await asyncio.to_thread(
+                create_payment,
+                telegram_id,
+                txid,
+                str(actual_amount),
+                recipient_address or PAYMENT_WALLET or "",
+                "TRON",
+                "USDT",
+            )
+
+            if not payment:
+                # حماية إضافية من سباق الطلبات
+                existing_payment = await asyncio.to_thread(
+                    get_payment_by_txid,
+                    txid,
+                )
+
+                if existing_payment:
+                    if existing_payment.get("telegram_id") != telegram_id:
+                        await update.message.reply_text(
+                            "⚠️ هذه المعاملة تم تسجيلها مسبقًا في النظام."
+                        )
+                        return
+
+                    if existing_payment.get("status") == "verified":
+                        await update.message.reply_text(
+                            "ℹ️ هذه المعاملة تم التحقق منها وتفعيلها سابقًا.\n\n"
+                            f"🧾 TXID:\n{txid}"
+                        )
+                        return
+
+                    await asyncio.to_thread(
+                        update_payment_status,
+                        txid,
+                        "verified",
+                        1,
+                        transaction_time,
+                    )
+                else:
+                    raise PaymentVerificationError(
+                        "Could not save verified payment."
+                    )
+            else:
+                await asyncio.to_thread(
+                    update_payment_status,
+                    txid,
+                    "verified",
+                    1,
+                    transaction_time,
+                )
 
         # ----------------------------------------------------
         # تفعيل الاشتراك
@@ -508,31 +522,20 @@ async def pay(
         )
 
         now = datetime.now(timezone.utc)
-
         current_expiry = (
             user.get("subscription_expires_at")
             if user
             else None
         )
 
-        if (
-            current_expiry
-            and
-            current_expiry > now
-        ):
-
+        if current_expiry and current_expiry > now:
             base_date = current_expiry
-
         else:
-
             base_date = now
 
         expires_at = (
             base_date
-            +
-            timedelta(
-                days=int(SUBSCRIPTION_DAYS)
-            )
+            + timedelta(days=int(SUBSCRIPTION_DAYS))
         )
 
         await asyncio.to_thread(
@@ -545,11 +548,7 @@ async def pay(
         # رسالة نجاح الدفع
         # ----------------------------------------------------
 
-        sender_text = (
-            sender_address
-            or
-            "غير متاح"
-        )
+        sender_text = sender_address or "غير متاح"
 
         await update.message.reply_text(
             "🎉 تم التحقق من الدفع بنجاح!\n\n"
@@ -572,7 +571,6 @@ async def pay(
         )
 
     except PaymentVerificationError as exc:
-
         logger.warning(
             "Payment verification failed. User=%s TXID=%s Error=%s",
             telegram_id,
@@ -593,7 +591,6 @@ async def pay(
         )
 
     except Exception:
-
         logger.exception(
             "Payment processing error"
         )
@@ -603,18 +600,28 @@ async def pay(
             "لم يتم تفعيل الاشتراك.\n"
             "حاول مرة أخرى لاحقًا."
         )
+
+
 # ============================================================
 # فحص الاستخدام قبل معالجة الطلب
 # ============================================================
 
-async def check_and_consume(update: Update):
+async def check_and_consume(
+    update: Update,
+):
+
     if not update.effective_user:
         return False
 
     telegram_id = update.effective_user.id
 
     if telegram_id == OWNER_TELEGRAM_ID:
-        logger.info("Owner access granted for user %s", telegram_id)
+
+        logger.info(
+            "Owner access granted for user %s",
+            telegram_id,
+        )
+
         return True
 
     allowed, user = await asyncio.to_thread(
@@ -623,16 +630,24 @@ async def check_and_consume(update: Update):
     )
 
     if not allowed:
-        await send_subscription_message(update)
+
+        await send_subscription_message(
+            update
+        )
+
         return False
 
     subscription_active = (
-        user.get("subscription_active", False)
+        user.get(
+            "subscription_active",
+            False,
+        )
         if user
         else False
     )
 
     if subscription_active:
+
         return True
 
     new_count = await asyncio.to_thread(
@@ -641,10 +656,12 @@ async def check_and_consume(update: Update):
     )
 
     if new_count is None:
+
         await update.message.reply_text(
             "⚠️ حدث خطأ أثناء تسجيل استخدام السؤال.\n"
             "حاول مرة أخرى."
         )
+
         return False
 
     logger.info(
@@ -660,7 +677,11 @@ async def check_and_consume(update: Update):
 # أمر البداية
 # ============================================================
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
     register_user(update)
 
     message = (
@@ -680,43 +701,76 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "أرسل ما تريد تحليله وسأحاول مساعدتك."
     )
 
-    await update.message.reply_text(message)
+    await update.message.reply_text(
+        message
+    )
 
 
 # ============================================================
 # أمر إدارة المستخدمين - للمالك فقط
 # ============================================================
 
-async def users(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def users(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
     if not update.effective_user:
         return
 
     telegram_id = update.effective_user.id
 
     if telegram_id != OWNER_TELEGRAM_ID:
+
         logger.warning(
             "Unauthorized /users attempt by user %s",
             telegram_id,
         )
+
         await update.message.reply_text(
             "⛔ هذا الأمر غير متاح."
         )
+
         return
 
     try:
-        stats = await asyncio.to_thread(get_user_stats)
+
+        stats = await asyncio.to_thread(
+            get_user_stats
+        )
 
         if not stats:
+
             await update.message.reply_text(
                 "⚠️ لم أستطع الحصول على إحصائيات المستخدمين."
             )
+
             return
 
-        total_users = stats.get("total_users", 0)
-        active_subscribers = stats.get("active_subscribers", 0)
-        expired_subscriptions = stats.get("expired_subscriptions", 0)
-        free_users_remaining = stats.get("free_users_remaining", 0)
-        total_questions_used = stats.get("total_questions_used", 0)
+        total_users = stats.get(
+            "total_users",
+            0,
+        )
+
+        active_subscribers = stats.get(
+            "active_subscribers",
+            0,
+        )
+
+        expired_subscriptions = stats.get(
+            "expired_subscriptions",
+            0,
+        )
+
+        free_users_remaining = stats.get(
+            "free_users_remaining",
+            0,
+        )
+
+        total_questions_used = stats.get(
+            "total_questions_used",
+            0,
+        )
 
         message = (
             "👑 لوحة إدارة مستخدمي SanadAI\n\n"
@@ -728,10 +782,16 @@ async def users(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "✅ قاعدة البيانات تعمل بشكل صحيح."
         )
 
-        await update.message.reply_text(message)
+        await update.message.reply_text(
+            message
+        )
 
     except Exception:
-        logger.exception("Users statistics error")
+
+        logger.exception(
+            "Users statistics error"
+        )
+
         await update.message.reply_text(
             "⚠️ حدث خطأ أثناء الحصول على إحصائيات المستخدمين."
         )
@@ -746,190 +806,87 @@ async def user_details(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
+
     if not update.effective_user:
         return
 
     owner_id = update.effective_user.id
 
     if owner_id != OWNER_TELEGRAM_ID:
+
         logger.warning(
             "Unauthorized /user attempt by user %s",
             owner_id,
         )
+
         await update.message.reply_text(
             "⛔ هذا الأمر غير متاح."
         )
+
         return
 
     if not context.args:
+
         await update.message.reply_text(
             "ℹ️ استخدم الأمر بهذا الشكل:\n\n"
             "/user Telegram_ID\n\n"
             "مثال:\n"
             "/user 8840372128"
         )
+
         return
 
     if len(context.args) != 1:
+
         await update.message.reply_text(
             "⚠️ يجب إدخال Telegram ID واحد فقط.\n\n"
             "مثال:\n"
             "/user 8840372128"
         )
+
         return
 
     target_id_text = context.args[0]
 
     try:
-        target_telegram_id = int(target_id_text)
+
+        target_telegram_id = int(
+            target_id_text
+        )
+
     except ValueError:
+
         await update.message.reply_text(
             "⚠️ Telegram ID يجب أن يكون رقمًا فقط.\n\n"
             "مثال:\n"
             "/user 8840372128"
         )
+
         return
 
     try:
+
         user = await asyncio.to_thread(
             get_user,
             target_telegram_id,
         )
 
         if not user:
+
             await update.message.reply_text(
                 "🔍 لم يتم العثور على هذا المستخدم "
                 "في قاعدة البيانات.\n\n"
                 f"Telegram ID: {target_telegram_id}"
             )
+
             return
 
-        username = user.get("username")
-        first_name = user.get("first_name")
-        questions_used = user.get("questions_used", 0)
-        subscription_active = user.get(
-            "subscription_active",
-            False,
-        )
-        subscription_expires_at = user.get(
-            "subscription_expires_at"
-        )
-        created_at = user.get("created_at")
-
-        actual_subscription_active = False
-
-        if subscription_active:
-            if (
-                subscription_expires_at
-                and subscription_expires_at > datetime.now(timezone.utc)
-            ):
-                actual_subscription_active = True
-            elif subscription_expires_at:
-                await asyncio.to_thread(
-                    deactivate_expired_subscription,
-                    target_telegram_id,
-                )
-
-        if actual_subscription_active:
-            subscription_status = "🟢 مفعّل"
-        else:
-            subscription_status = "⚪ غير مفعّل"
-
-        remaining_free = max(
-            FREE_QUESTIONS - questions_used,
-            0,
+        username = user.get(
+            "username"
         )
 
-        username_text = (
-            f"@{username}"
-            if username
-            else "غير موجود"
-        )
-
-        name_text = (
-            first_name
-            if first_name
-            else "غير موجود"
-        )
-
-        expires_text = (
-            str(subscription_expires_at)
-            if subscription_expires_at
-            else "لا يوجد"
-        )
-
-        created_text = (
-            str(created_at)
-            if created_at
-            else "غير معروف"
-        )
-
-        message = (
-            "👤 بيانات المستخدم\n\n"
-            f"🆔 Telegram ID: {target_telegram_id}\n"
-            f"👤 الاسم: {name_text}\n"
-            f"🔹 Username: {username_text}\n"
-            f"🔢 الأسئلة المستخدمة: {questions_used}\n"
-            f"🎁 الأسئلة المجانية المتبقية: {remaining_free}\n"
-            f"💳 الاشتراك: {subscription_status}\n"
-            f"📅 انتهاء الاشتراك: {expires_text}\n"
-            f"🕐 تاريخ إنشاء الحساب: {created_text}"
-        )
-
-        await update.message.reply_text(message)
-
-    except Exception:
-        logger.exception("User details error")
-        await update.message.reply_text(
-            "⚠️ حدث خطأ أثناء الحصول على بيانات المستخدم."
-        )
-
-
-# ============================================================
-# فحص قاعدة البيانات - للمالك فقط
-# ============================================================
-
-async def mydb(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-):
-    if not update.effective_user:
-        return
-
-    telegram_id = update.effective_user.id
-
-    if telegram_id != OWNER_TELEGRAM_ID:
-        logger.warning(
-            "Unauthorized /mydb attempt by user %s",
-            telegram_id,
-        )
-        await update.message.reply_text(
-            "⛔ هذا الأمر غير متاح."
-        )
-        return
-
-    register_user(update)
-
-    try:
-        user = await asyncio.to_thread(
-            get_user,
-            telegram_id,
-        )
-
-        if not user:
-            await update.message.reply_text(
-                "⚠️ لم يتم العثور على حسابك في قاعدة البيانات."
-            )
-            return
-
-        username = (
-            user.get("username")
-            or "غير موجود"
-        )
-
-        first_name = (
-            user.get("first_name")
-            or "غير موجود"
+        first_name = user.get(
+            "first_name"
         )
 
         questions_used = user.get(
@@ -946,24 +903,204 @@ async def mydb(
             "subscription_expires_at"
         )
 
-        created_at = user.get("created_at")
-
-        expires_text = (
-            str(subscription_expires_at)
-            if subscription_expires_at
-            else "لا يوجد"
+        created_at = user.get(
+            "created_at"
         )
 
-        created_text = (
-            str(created_at)
-            if created_at
-            else "غير معروف"
+        actual_subscription_active = False
+
+        if subscription_active:
+
+            if (
+                subscription_expires_at
+                and
+                subscription_expires_at > datetime.now(timezone.utc)
+            ):
+
+                actual_subscription_active = True
+
+            elif subscription_expires_at:
+
+                await asyncio.to_thread(
+                    deactivate_expired_subscription,
+                    target_telegram_id,
+                )
+
+        if actual_subscription_active:
+
+            subscription_status = "🟢 مفعّل"
+
+        else:
+
+            subscription_status = "⚪ غير مفعّل"
+
+        remaining_free = max(
+            FREE_QUESTIONS - questions_used,
+            0,
         )
+
+        if username:
+
+            username_text = f"@{username}"
+
+        else:
+
+            username_text = "غير موجود"
+
+        if first_name:
+
+            name_text = first_name
+
+        else:
+
+            name_text = "غير موجود"
+
+        if subscription_expires_at:
+
+            expires_text = str(
+                subscription_expires_at
+            )
+
+        else:
+
+            expires_text = "لا يوجد"
+
+        if created_at:
+
+            created_text = str(
+                created_at
+            )
+
+        else:
+
+            created_text = "غير معروف"
+
+        message = (
+            "👤 بيانات المستخدم\n\n"
+            f"🆔 Telegram ID: {target_telegram_id}\n"
+            f"👤 الاسم: {name_text}\n"
+            f"🔹 Username: {username_text}\n"
+            f"🔢 الأسئلة المستخدمة: {questions_used}\n"
+            f"🎁 الأسئلة المجانية المتبقية: {remaining_free}\n"
+            f"💳 الاشتراك: {subscription_status}\n"
+            f"📅 انتهاء الاشتراك: {expires_text}\n"
+            f"🕐 تاريخ إنشاء الحساب: {created_text}"
+        )
+
+        await update.message.reply_text(
+            message
+        )
+
+    except Exception:
+
+        logger.exception(
+            "User details error"
+        )
+
+        await update.message.reply_text(
+            "⚠️ حدث خطأ أثناء الحصول على بيانات المستخدم."
+        )
+
+
+# ============================================================
+# فحص قاعدة البيانات - للمالك فقط
+# ============================================================
+
+async def mydb(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    if not update.effective_user:
+        return
+
+    telegram_id = update.effective_user.id
+
+    if telegram_id != OWNER_TELEGRAM_ID:
+
+        logger.warning(
+            "Unauthorized /mydb attempt by user %s",
+            telegram_id,
+        )
+
+        await update.message.reply_text(
+            "⛔ هذا الأمر غير متاح."
+        )
+
+        return
+
+    register_user(update)
+
+    try:
+
+        user = await asyncio.to_thread(
+            get_user,
+            telegram_id,
+        )
+
+        if not user:
+
+            await update.message.reply_text(
+                "⚠️ لم يتم العثور على حسابك في قاعدة البيانات."
+            )
+
+            return
+
+        username = (
+            user.get("username")
+            or
+            "غير موجود"
+        )
+
+        first_name = (
+            user.get("first_name")
+            or
+            "غير موجود"
+        )
+
+        questions_used = user.get(
+            "questions_used",
+            0,
+        )
+
+        subscription_active = user.get(
+            "subscription_active",
+            False,
+        )
+
+        subscription_expires_at = user.get(
+            "subscription_expires_at"
+        )
+
+        created_at = user.get(
+            "created_at"
+        )
+
+        if subscription_expires_at:
+
+            expires_text = str(
+                subscription_expires_at
+            )
+
+        else:
+
+            expires_text = "لا يوجد"
+
+        if created_at:
+
+            created_text = str(
+                created_at
+            )
+
+        else:
+
+            created_text = "غير معروف"
 
         status = (
             "🟢 مفعّل"
             if subscription_active
-            else "⚪ غير مفعّل"
+            else
+            "⚪ غير مفعّل"
         )
 
         remaining = max(
@@ -984,10 +1121,16 @@ async def mydb(
             "✅ قاعدة البيانات متصلة وحسابك مسجل."
         )
 
-        await update.message.reply_text(message)
+        await update.message.reply_text(
+            message
+        )
 
     except Exception:
-        logger.exception("Database check error")
+
+        logger.exception(
+            "Database check error"
+        )
+
         await update.message.reply_text(
             "⚠️ حدث خطأ أثناء فحص قاعدة البيانات."
         )
@@ -998,40 +1141,23 @@ async def mydb(
 # ============================================================
 
 async def run_gemini(contents):
+
     if gemini_client is None:
+
         raise RuntimeError(
             "GEMINI_API_KEY غير موجود."
         )
 
-    started_at = time.monotonic()
-
     def generate():
+
         return gemini_client.models.generate_content(
             model=GEMINI_MODEL,
             contents=contents,
         )
 
-    try:
-        result = await asyncio.to_thread(generate)
-
-        elapsed = time.monotonic() - started_at
-
-        logger.info(
-            "Gemini request completed in %.2f seconds",
-            elapsed,
-        )
-
-        return result
-
-    except Exception:
-        elapsed = time.monotonic() - started_at
-
-        logger.exception(
-            "Gemini request failed after %.2f seconds",
-            elapsed,
-        )
-
-        raise
+    return await asyncio.to_thread(
+        generate
+    )
 
 
 # ============================================================
@@ -1042,22 +1168,22 @@ async def handle_message(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
+
     register_user(update)
 
-    allowed = await check_and_consume(update)
+    allowed = await check_and_consume(
+        update
+    )
 
     if not allowed:
         return
 
     try:
+
         user_text = update.message.text
 
         if not user_text:
             return
-
-        await update.message.reply_text(
-            "⏳ جارٍ معالجة سؤالك..."
-        )
 
         response = await run_gemini(
             user_text
@@ -1066,6 +1192,7 @@ async def handle_message(
         answer = response.text
 
         if not answer:
+
             answer = (
                 "⚠️ لم أستطع الحصول على إجابة."
             )
@@ -1075,6 +1202,7 @@ async def handle_message(
         )
 
     except Exception:
+
         logger.exception(
             "Text processing error"
         )
@@ -1092,14 +1220,18 @@ async def handle_photo(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
+
     register_user(update)
 
-    allowed = await check_and_consume(update)
+    allowed = await check_and_consume(
+        update
+    )
 
     if not allowed:
         return
 
     try:
+
         await update.message.reply_text(
             "🖼️ تم استلام الصورة.\n"
             "⏳ جارٍ تحليلها..."
@@ -1122,10 +1254,12 @@ async def handle_photo(
         )
 
         contents = [
+
             types.Part.from_bytes(
                 data=bytes(image_bytes),
                 mime_type="image/jpeg",
             ),
+
             user_text,
         ]
 
@@ -1136,6 +1270,7 @@ async def handle_photo(
         answer = response.text
 
         if not answer:
+
             answer = (
                 "⚠️ لم أستطع تحليل الصورة."
             )
@@ -1145,6 +1280,7 @@ async def handle_photo(
         )
 
     except Exception:
+
         logger.exception(
             "Image processing error"
         )
@@ -1160,14 +1296,24 @@ async def handle_photo(
 # ============================================================
 
 SUPPORTED_DOCUMENTS = {
-    ".pdf": "application/pdf",
+
+    ".pdf":
+        "application/pdf",
+
     ".docx":
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+
     ".xlsx":
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    ".xls": "application/vnd.ms-excel",
-    ".csv": "text/csv",
-    ".txt": "text/plain",
+
+    ".xls":
+        "application/vnd.ms-excel",
+
+    ".csv":
+        "text/csv",
+
+    ".txt":
+        "text/plain",
 }
 
 
@@ -1179,9 +1325,12 @@ async def handle_document(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
+
     register_user(update)
 
-    allowed = await check_and_consume(update)
+    allowed = await check_and_consume(
+        update
+    )
 
     if not allowed:
         return
@@ -1190,6 +1339,7 @@ async def handle_document(
     uploaded_file = None
 
     try:
+
         document = update.message.document
 
         if document is None:
@@ -1197,7 +1347,8 @@ async def handle_document(
 
         file_name = (
             document.file_name
-            or "file"
+            or
+            "file"
         )
 
         extension = os.path.splitext(
@@ -1207,6 +1358,7 @@ async def handle_document(
         mime_type = document.mime_type
 
         if extension not in SUPPORTED_DOCUMENTS:
+
             await update.message.reply_text(
                 "⚠️ هذا النوع من الملفات غير مدعوم حاليًا.\n\n"
                 "الأنواع المدعومة:\n"
@@ -1216,22 +1368,36 @@ async def handle_document(
                 "📋 CSV\n"
                 "📃 TXT"
             )
+
             return
 
         if not mime_type:
+
             mime_type = SUPPORTED_DOCUMENTS[
                 extension
             ]
 
         if extension == ".pdf":
+
             icon = "📄"
+
         elif extension == ".docx":
+
             icon = "📝"
-        elif extension in [".xlsx", ".xls"]:
+
+        elif extension in [
+            ".xlsx",
+            ".xls",
+        ]:
+
             icon = "📊"
+
         elif extension == ".csv":
+
             icon = "📋"
+
         else:
+
             icon = "📃"
 
         await update.message.reply_text(
@@ -1247,13 +1413,15 @@ async def handle_document(
         suffix = (
             extension
             if extension
-            else ".tmp"
+            else
+            ".tmp"
         )
 
         with tempfile.NamedTemporaryFile(
             delete=False,
             suffix=suffix,
         ) as temp_file:
+
             temp_path = temp_file.name
 
         await telegram_file.download_to_drive(
@@ -1261,6 +1429,7 @@ async def handle_document(
         )
 
         def upload_file():
+
             return gemini_client.files.upload(
                 file=temp_path
             )
@@ -1287,7 +1456,8 @@ async def handle_document(
             file_uri=uploaded_file.uri,
             mime_type=(
                 uploaded_file.mime_type
-                or mime_type
+                or
+                mime_type
             ),
         )
 
@@ -1301,6 +1471,7 @@ async def handle_document(
         answer = response.text
 
         if not answer:
+
             answer = (
                 "⚠️ تم استلام الملف، "
                 "لكن لم أستطع استخراج إجابة منه."
@@ -1311,6 +1482,7 @@ async def handle_document(
         )
 
     except Exception:
+
         logger.exception(
             "Document processing error"
         )
@@ -1321,11 +1493,21 @@ async def handle_document(
         )
 
     finally:
+
         if temp_path:
+
             try:
-                if os.path.exists(temp_path):
-                    os.remove(temp_path)
+
+                if os.path.exists(
+                    temp_path
+                ):
+
+                    os.remove(
+                        temp_path
+                    )
+
             except Exception:
+
                 logger.warning(
                     "Could not remove temporary file"
                 )
@@ -1336,17 +1518,21 @@ async def handle_document(
 # ============================================================
 
 def main():
+
     if not TELEGRAM_BOT_TOKEN:
+
         raise RuntimeError(
             "TELEGRAM_BOT_TOKEN غير موجود."
         )
 
     if not GEMINI_API_KEY:
+
         raise RuntimeError(
             "GEMINI_API_KEY غير موجود."
         )
 
     try:
+
         init_database()
 
         logger.info(
@@ -1354,10 +1540,19 @@ def main():
         )
 
     except Exception:
+
         logger.exception(
             "Database initialization failed."
         )
+
         raise
+
+    health_thread = threading.Thread(
+        target=start_health_server,
+        daemon=True,
+    )
+
+    health_thread.start()
 
     application = (
         Application.builder()
@@ -1429,29 +1624,10 @@ def main():
     )
 
     logger.info(
-        "SanadAI bot is starting with Telegram webhook..."
+        "SanadAI bot is starting..."
     )
 
-    logger.info(
-        "Telegram webhook URL: %s",
-        WEBHOOK_URL,
-    )
-
-    port = int(
-        os.environ.get(
-            "PORT",
-            "10000",
-        )
-    )
-
-    application.run_webhook(
-        listen="0.0.0.0",
-        port=port,
-        url_path=WEBHOOK_PATH.lstrip("/"),
-        webhook_url=WEBHOOK_URL,
-        allowed_updates=Update.ALL_TYPES,
-        drop_pending_updates=False,
-    )
+    application.run_polling()
 
 
 # ============================================================
@@ -1459,4 +1635,6 @@ def main():
 # ============================================================
 
 if __name__ == "__main__":
+
     main()
+
