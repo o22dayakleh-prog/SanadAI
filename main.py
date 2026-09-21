@@ -3,7 +3,7 @@ import logging
 import threading
 import tempfile
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -28,7 +28,11 @@ from database import (
     deactivate_expired_subscription,
     create_payment,
     get_payment_by_txid,
+    update_payment_status,
+    activate_subscription,
 )
+
+from payment import verify_payment, PaymentVerificationError
 
 
 # ============================================================
@@ -188,13 +192,8 @@ def can_use_service(telegram_id):
         if not user:
             return False, None
 
-        # المالك لديه استخدام مجاني بلا حدود
         if telegram_id == OWNER_TELEGRAM_ID:
             return True, user
-
-        # ----------------------------------------------------
-        # التحقق من انتهاء الاشتراك
-        # ----------------------------------------------------
 
         subscription_active = user.get(
             "subscription_active",
@@ -222,10 +221,6 @@ def can_use_service(telegram_id):
         if subscription_active:
 
             return True, user
-
-        # ----------------------------------------------------
-        # الأسئلة المجانية
-        # ----------------------------------------------------
 
         questions_used = user.get(
             "questions_used",
@@ -296,8 +291,7 @@ async def send_subscription_message(
         "━━━━━━━━━━━━━━━━━━\n\n"
         "بعد إتمام التحويل، أرسل رقم المعاملة TXID بهذا الشكل:\n\n"
         "/pay TXID\n\n"
-        "⏳ سيتم تسجيل المعاملة وانتظار التحقق منها.\n"
-        "⚠️ لن يتم تفعيل الاشتراك قبل التحقق الحقيقي من المعاملة.\n\n"
+        "🔎 سيتم التحقق من المعاملة على شبكة TRON قبل تفعيل الاشتراك.\n"
         "🔐 لا ترسل أبدًا المفتاح الخاص لمحفظتك."
     )
 
@@ -323,7 +317,7 @@ async def subscribe(
 
 
 # ============================================================
-# استقبال TXID
+# استقبال TXID والتحقق من الدفع
 # الاستخدام: /pay TXID
 # ============================================================
 
@@ -338,10 +332,6 @@ async def pay(
         return
 
     telegram_id = update.effective_user.id
-
-    # --------------------------------------------------------
-    # التأكد من وجود TXID
-    # --------------------------------------------------------
 
     if not context.args:
 
@@ -365,10 +355,6 @@ async def pay(
         return
 
     txid = context.args[0].strip()
-
-    # --------------------------------------------------------
-    # فحص مبدئي لشكل TXID
-    # --------------------------------------------------------
 
     if len(txid) != 64:
 
@@ -395,11 +381,11 @@ async def pay(
 
         return
 
-    # --------------------------------------------------------
-    # فحص وجود TXID مسبقًا
-    # --------------------------------------------------------
-
     try:
+
+        # ----------------------------------------------------
+        # منع إعادة استخدام TXID
+        # ----------------------------------------------------
 
         existing_payment = await asyncio.to_thread(
             get_payment_by_txid,
@@ -412,12 +398,26 @@ async def pay(
                 "telegram_id"
             )
 
-            if existing_user_id == telegram_id:
+            status = existing_payment.get(
+                "status"
+            )
+
+            if (
+                existing_user_id == telegram_id
+                and status == "verified"
+            ):
+
+                await update.message.reply_text(
+                    "ℹ️ هذه المعاملة تم التحقق منها وتفعيلها سابقًا.\n\n"
+                    f"🧾 TXID:\n{txid}"
+                )
+
+            elif existing_user_id == telegram_id:
 
                 await update.message.reply_text(
                     "ℹ️ هذه المعاملة مسجلة لديك بالفعل.\n\n"
-                    f"🧾 TXID:\n{txid}\n\n"
-                    "⏳ حالتها الحالية بانتظار التحقق."
+                    f"🧾 TXID:\n{txid}\n"
+                    f"⏳ الحالة الحالية: {status}"
                 )
 
             else:
@@ -429,53 +429,209 @@ async def pay(
             return
 
         # ----------------------------------------------------
-        # تسجيل الدفع كـ pending
+        # إعلام المستخدم ببدء التحقق
+        # ----------------------------------------------------
+
+        await update.message.reply_text(
+            "🔎 جارٍ التحقق من المعاملة على شبكة TRON...\n"
+            "⏳ قد يستغرق الفحص بضع ثوانٍ."
+        )
+
+        # ----------------------------------------------------
+        # التحقق الحقيقي من البلوكشين
+        # ----------------------------------------------------
+
+        verified = await asyncio.to_thread(
+            verify_payment,
+            txid,
+        )
+
+        if not verified.get("verified"):
+
+            raise PaymentVerificationError(
+                "Transaction verification failed."
+            )
+
+        actual_amount = verified.get(
+            "amount_usdt"
+        )
+
+        sender_address = verified.get(
+            "sender_address"
+        )
+
+        recipient_address = verified.get(
+            "recipient_address"
+        )
+
+        # ----------------------------------------------------
+        # تسجيل المعاملة بعد نجاح التحقق
         # ----------------------------------------------------
 
         payment = await asyncio.to_thread(
             create_payment,
             telegram_id,
             txid,
-            SUBSCRIPTION_PRICE_USDT,
-            PAYMENT_WALLET or "",
+            str(actual_amount),
+            recipient_address or PAYMENT_WALLET or "",
             "TRON",
             "USDT",
         )
 
         if not payment:
 
-            await update.message.reply_text(
-                "⚠️ لم يتم تسجيل المعاملة.\n"
-                "قد تكون مسجلة مسبقًا."
+            # حماية إضافية من سباق الطلبات
+            existing_payment = await asyncio.to_thread(
+                get_payment_by_txid,
+                txid,
             )
 
-            return
+            if existing_payment:
+
+                await update.message.reply_text(
+                    "ℹ️ هذه المعاملة تم تسجيلها مسبقًا."
+                )
+
+                return
+
+            raise PaymentVerificationError(
+                "Could not save verified payment."
+            )
+
+        # ----------------------------------------------------
+        # تحديث حالة الدفع إلى verified
+        # ----------------------------------------------------
+
+        transaction_time = None
+
+        block_timestamp = verified.get(
+            "block_timestamp"
+        )
+
+        if block_timestamp:
+
+            try:
+
+                transaction_time = datetime.fromtimestamp(
+                    int(block_timestamp) / 1000,
+                    tz=timezone.utc,
+                )
+
+            except Exception:
+
+                transaction_time = None
+
+        await asyncio.to_thread(
+            update_payment_status,
+            txid,
+            "verified",
+            1,
+            transaction_time,
+        )
+
+        # ----------------------------------------------------
+        # تفعيل الاشتراك
+        # ----------------------------------------------------
+
+        user = await asyncio.to_thread(
+            get_user,
+            telegram_id,
+        )
+
+        now = datetime.now(timezone.utc)
+
+        current_expiry = (
+            user.get("subscription_expires_at")
+            if user
+            else None
+        )
+
+        if (
+            current_expiry
+            and
+            current_expiry > now
+        ):
+
+            base_date = current_expiry
+
+        else:
+
+            base_date = now
+
+        expires_at = (
+            base_date
+            +
+            timedelta(
+                days=int(SUBSCRIPTION_DAYS)
+            )
+        )
+
+        await asyncio.to_thread(
+            activate_subscription,
+            telegram_id,
+            expires_at,
+        )
+
+        # ----------------------------------------------------
+        # رسالة نجاح الدفع
+        # ----------------------------------------------------
+
+        sender_text = (
+            sender_address
+            or
+            "غير متاح"
+        )
 
         await update.message.reply_text(
-            "✅ تم استلام بيانات المعاملة.\n\n"
+            "🎉 تم التحقق من الدفع بنجاح!\n\n"
+            "✅ المعاملة مؤكدة على شبكة TRON\n"
+            "🪙 العملة: USDT TRC20\n"
+            f"💰 المبلغ المستلم: {actual_amount} USDT\n"
+            f"📅 الاشتراك فعال حتى:\n{expires_at}\n\n"
             f"🧾 TXID:\n{txid}\n\n"
-            "💰 المبلغ المتوقع: "
-            f"{SUBSCRIPTION_PRICE_USDT} USDT\n"
-            "🌐 الشبكة: TRON (TRC20)\n"
-            "⏳ الحالة: بانتظار التحقق\n\n"
-            "🔎 سيتم التحقق من المعاملة قبل تفعيل الاشتراك.\n"
-            "❗ إرسال TXID وحده لا يعني تفعيل الاشتراك."
+            f"📤 عنوان المرسل:\n{sender_text}\n\n"
+            "🚀 يمكنك الآن استخدام SanadAI بدون استهلاك الأسئلة المجانية."
         )
 
         logger.info(
-            "Payment submitted. User=%s TXID=%s",
+            "Payment verified and subscription activated. "
+            "User=%s TXID=%s Amount=%s Expires=%s",
             telegram_id,
             txid,
+            actual_amount,
+            expires_at,
+        )
+
+    except PaymentVerificationError as exc:
+
+        logger.warning(
+            "Payment verification failed. User=%s TXID=%s Error=%s",
+            telegram_id,
+            txid,
+            exc,
+        )
+
+        await update.message.reply_text(
+            "❌ لم يتم تفعيل الاشتراك.\n\n"
+            f"السبب:\n{exc}\n\n"
+            "تأكد من أن:\n"
+            "• المعاملة على شبكة TRON (TRC20)\n"
+            "• العملة هي USDT\n"
+            "• المبلغ يساوي أو يتجاوز سعر الاشتراك\n"
+            "• التحويل وصل إلى عنوان SanadAI الصحيح\n"
+            "• المعاملة مؤكدة على الشبكة\n\n"
+            "ثم يمكنك المحاولة مرة أخرى."
         )
 
     except Exception:
 
         logger.exception(
-            "Payment submission error"
+            "Payment processing error"
         )
 
         await update.message.reply_text(
-            "⚠️ حدث خطأ أثناء تسجيل المعاملة.\n"
+            "⚠️ حدث خطأ غير متوقع أثناء التحقق من الدفع.\n"
+            "لم يتم تفعيل الاشتراك.\n"
             "حاول مرة أخرى لاحقًا."
         )
 
@@ -515,7 +671,6 @@ async def check_and_consume(
 
         return False
 
-    # المستخدم المشترك لا يستهلك الأسئلة المجانية
     subscription_active = (
         user.get(
             "subscription_active",
@@ -1439,10 +1594,6 @@ def main():
         .build()
     )
 
-    # ========================================================
-    # الأوامر
-    # ========================================================
-
     application.add_handler(
         CommandHandler(
             "start",
@@ -1485,10 +1636,6 @@ def main():
         )
     )
 
-    # ========================================================
-    # الصور
-    # ========================================================
-
     application.add_handler(
         MessageHandler(
             filters.PHOTO,
@@ -1496,20 +1643,12 @@ def main():
         )
     )
 
-    # ========================================================
-    # الملفات
-    # ========================================================
-
     application.add_handler(
         MessageHandler(
             filters.Document.ALL,
             handle_document,
         )
     )
-
-    # ========================================================
-    # الرسائل النصية
-    # ========================================================
 
     application.add_handler(
         MessageHandler(
