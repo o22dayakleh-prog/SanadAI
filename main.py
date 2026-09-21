@@ -287,7 +287,8 @@ async def send_subscription_message(
         "🌐 الشبكة: TRON (TRC20)\n"
         "🪙 العملة: USDT\n\n"
         "📥 عنوان الدفع:\n"
-        f"{wallet}\n\n"
+        f"<code>{wallet}</code>\n\n"
+        "👆 اضغط على عنوان المحفظة لنسخه بسهولة.\n\n"
         "━━━━━━━━━━━━━━━━━━\n\n"
         "بعد إتمام التحويل، أرسل رقم المعاملة TXID بهذا الشكل:\n\n"
         "/pay TXID\n\n"
@@ -296,7 +297,8 @@ async def send_subscription_message(
     )
 
     await update.message.reply_text(
-        message
+        message,
+        parse_mode="HTML",
     )
 
 
@@ -1671,3 +1673,4 @@ def main():
 if __name__ == "__main__":
 
     main()
+
