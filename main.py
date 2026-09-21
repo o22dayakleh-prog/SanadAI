@@ -2,15 +2,10 @@ import os
 import logging
 import tempfile
 import asyncio
+import time
 from datetime import datetime, timezone, timedelta
 
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    CopyTextButton,
-)
-
+from telegram import Update
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -55,13 +50,9 @@ logger = logging.getLogger(__name__)
 # ============================================================
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-PAYMENT_WALLET = os.getenv(
-    "PAYMENT_WALLET",
-    "",
-).strip()
+PAYMENT_WALLET = os.getenv("PAYMENT_WALLET")
 
 SUBSCRIPTION_PRICE_USDT = os.getenv(
     "SUBSCRIPTION_PRICE_USDT",
@@ -82,22 +73,6 @@ OWNER_TELEGRAM_ID = int(
 
 
 # ============================================================
-# إعداد Webhook الخاص بـ Render
-# ============================================================
-
-RENDER_EXTERNAL_URL = os.getenv(
-    "RENDER_EXTERNAL_URL",
-    "https://sanadai-bot.onrender.com",
-).rstrip("/")
-
-WEBHOOK_PATH = "telegram"
-
-WEBHOOK_URL = (
-    f"{RENDER_EXTERNAL_URL}/{WEBHOOK_PATH}"
-)
-
-
-# ============================================================
 # إعداد الأسئلة المجانية
 # ============================================================
 
@@ -113,10 +88,26 @@ GEMINI_MODEL = "gemini-3.6-flash"
 gemini_client = None
 
 if GEMINI_API_KEY:
-
     gemini_client = genai.Client(
         api_key=GEMINI_API_KEY
     )
+
+
+# ============================================================
+# إعداد Telegram Webhook على Render
+# ============================================================
+
+RENDER_EXTERNAL_URL = os.getenv(
+    "RENDER_EXTERNAL_URL",
+    "https://sanadai-bot.onrender.com",
+).rstrip("/")
+
+WEBHOOK_PATH = "/telegram"
+
+WEBHOOK_URL = (
+    f"{RENDER_EXTERNAL_URL}"
+    f"{WEBHOOK_PATH}"
+)
 
 
 # ============================================================
@@ -169,12 +160,7 @@ def can_use_service(telegram_id):
         if not user:
             return False, None
 
-        # ----------------------------------------------------
-        # المالك لديه وصول كامل
-        # ----------------------------------------------------
-
         if telegram_id == OWNER_TELEGRAM_ID:
-
             return True, user
 
         subscription_active = user.get(
@@ -185,10 +171,6 @@ def can_use_service(telegram_id):
         subscription_expires_at = user.get(
             "subscription_expires_at"
         )
-
-        # ----------------------------------------------------
-        # التحقق من انتهاء الاشتراك
-        # ----------------------------------------------------
 
         if subscription_active:
 
@@ -204,17 +186,8 @@ def can_use_service(telegram_id):
 
                 subscription_active = False
 
-        # ----------------------------------------------------
-        # الاشتراك الفعال
-        # ----------------------------------------------------
-
         if subscription_active:
-
             return True, user
-
-        # ----------------------------------------------------
-        # الأسئلة المجانية
-        # ----------------------------------------------------
 
         questions_used = user.get(
             "questions_used",
@@ -222,7 +195,6 @@ def can_use_service(telegram_id):
         )
 
         if questions_used < FREE_QUESTIONS:
-
             return True, user
 
         return False, user
@@ -243,7 +215,6 @@ def can_use_service(telegram_id):
 def consume_question(telegram_id):
 
     if telegram_id == OWNER_TELEGRAM_ID:
-
         return 0
 
     try:
@@ -283,7 +254,7 @@ async def send_subscription_message(
         "🪙 العملة: USDT\n\n"
         "📥 عنوان الدفع:\n"
         f"<code>{wallet}</code>\n\n"
-        "اضغط على زر النسخ لنسخ عنوان المحفظة.\n\n"
+        "👆 اضغط على عنوان المحفظة لنسخه بسهولة.\n\n"
         "━━━━━━━━━━━━━━━━━━\n\n"
         "بعد إتمام التحويل، أرسل رقم المعاملة TXID بهذا الشكل:\n\n"
         "/pay TXID\n\n"
@@ -291,27 +262,9 @@ async def send_subscription_message(
         "🔐 لا ترسل أبدًا المفتاح الخاص لمحفظتك."
     )
 
-    # --------------------------------------------------------
-    # زر نسخ عنوان المحفظة
-    # --------------------------------------------------------
-
-    reply_markup = InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton(
-                    "📋 نسخ عنوان الدفع",
-                    copy_text=CopyTextButton(
-                        text=wallet
-                    ),
-                )
-            ]
-        ]
-    )
-
     await update.message.reply_text(
         message,
         parse_mode="HTML",
-        reply_markup=reply_markup,
     )
 
 
@@ -495,9 +448,7 @@ async def pay(
 
         if not payment:
 
-            # ------------------------------------------------
             # حماية إضافية من سباق الطلبات
-            # ------------------------------------------------
 
             existing_payment = await asyncio.to_thread(
                 get_payment_by_txid,
@@ -652,37 +603,19 @@ async def pay(
             "لم يتم تفعيل الاشتراك.\n"
             "حاول مرة أخرى لاحقًا."
         )
-
-
 # ============================================================
 # فحص الاستخدام قبل معالجة الطلب
 # ============================================================
 
-async def check_and_consume(
-    update: Update,
-):
-
+async def check_and_consume(update: Update):
     if not update.effective_user:
         return False
 
     telegram_id = update.effective_user.id
 
-    # --------------------------------------------------------
-    # المالك لديه وصول كامل
-    # --------------------------------------------------------
-
     if telegram_id == OWNER_TELEGRAM_ID:
-
-        logger.info(
-            "Owner access granted for user %s",
-            telegram_id,
-        )
-
+        logger.info("Owner access granted for user %s", telegram_id)
         return True
-
-    # --------------------------------------------------------
-    # فحص المستخدم
-    # --------------------------------------------------------
 
     allowed, user = await asyncio.to_thread(
         can_use_service,
@@ -690,33 +623,17 @@ async def check_and_consume(
     )
 
     if not allowed:
-
-        await send_subscription_message(
-            update
-        )
-
+        await send_subscription_message(update)
         return False
 
-    # --------------------------------------------------------
-    # فحص الاشتراك
-    # --------------------------------------------------------
-
     subscription_active = (
-        user.get(
-            "subscription_active",
-            False,
-        )
+        user.get("subscription_active", False)
         if user
         else False
     )
 
     if subscription_active:
-
         return True
-
-    # --------------------------------------------------------
-    # استهلاك سؤال مجاني
-    # --------------------------------------------------------
 
     new_count = await asyncio.to_thread(
         consume_question,
@@ -724,12 +641,10 @@ async def check_and_consume(
     )
 
     if new_count is None:
-
         await update.message.reply_text(
             "⚠️ حدث خطأ أثناء تسجيل استخدام السؤال.\n"
             "حاول مرة أخرى."
         )
-
         return False
 
     logger.info(
@@ -745,11 +660,7 @@ async def check_and_consume(
 # أمر البداية
 # ============================================================
 
-async def start(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-):
-
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     register_user(update)
 
     message = (
@@ -769,76 +680,43 @@ async def start(
         "أرسل ما تريد تحليله وسأحاول مساعدتك."
     )
 
-    await update.message.reply_text(
-        message
-    )
+    await update.message.reply_text(message)
 
 
 # ============================================================
 # أمر إدارة المستخدمين - للمالك فقط
 # ============================================================
 
-async def users(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-):
-
+async def users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.effective_user:
         return
 
     telegram_id = update.effective_user.id
 
     if telegram_id != OWNER_TELEGRAM_ID:
-
         logger.warning(
             "Unauthorized /users attempt by user %s",
             telegram_id,
         )
-
         await update.message.reply_text(
             "⛔ هذا الأمر غير متاح."
         )
-
         return
 
     try:
-
-        stats = await asyncio.to_thread(
-            get_user_stats
-        )
+        stats = await asyncio.to_thread(get_user_stats)
 
         if not stats:
-
             await update.message.reply_text(
                 "⚠️ لم أستطع الحصول على إحصائيات المستخدمين."
             )
-
             return
 
-        total_users = stats.get(
-            "total_users",
-            0,
-        )
-
-        active_subscribers = stats.get(
-            "active_subscribers",
-            0,
-        )
-
-        expired_subscriptions = stats.get(
-            "expired_subscriptions",
-            0,
-        )
-
-        free_users_remaining = stats.get(
-            "free_users_remaining",
-            0,
-        )
-
-        total_questions_used = stats.get(
-            "total_questions_used",
-            0,
-        )
+        total_users = stats.get("total_users", 0)
+        active_subscribers = stats.get("active_subscribers", 0)
+        expired_subscriptions = stats.get("expired_subscriptions", 0)
+        free_users_remaining = stats.get("free_users_remaining", 0)
+        total_questions_used = stats.get("total_questions_used", 0)
 
         message = (
             "👑 لوحة إدارة مستخدمي SanadAI\n\n"
@@ -850,16 +728,10 @@ async def users(
             "✅ قاعدة البيانات تعمل بشكل صحيح."
         )
 
-        await update.message.reply_text(
-            message
-        )
+        await update.message.reply_text(message)
 
     except Exception:
-
-        logger.exception(
-            "Users statistics error"
-        )
-
+        logger.exception("Users statistics error")
         await update.message.reply_text(
             "⚠️ حدث خطأ أثناء الحصول على إحصائيات المستخدمين."
         )
@@ -874,132 +746,93 @@ async def user_details(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
-
     if not update.effective_user:
         return
 
     owner_id = update.effective_user.id
 
     if owner_id != OWNER_TELEGRAM_ID:
-
         logger.warning(
             "Unauthorized /user attempt by user %s",
             owner_id,
         )
-
         await update.message.reply_text(
             "⛔ هذا الأمر غير متاح."
         )
-
         return
 
     if not context.args:
-
         await update.message.reply_text(
             "ℹ️ استخدم الأمر بهذا الشكل:\n\n"
             "/user Telegram_ID\n\n"
             "مثال:\n"
             "/user 8840372128"
         )
-
         return
 
     if len(context.args) != 1:
-
         await update.message.reply_text(
             "⚠️ يجب إدخال Telegram ID واحد فقط.\n\n"
             "مثال:\n"
             "/user 8840372128"
         )
-
         return
 
     target_id_text = context.args[0]
 
     try:
-
-        target_telegram_id = int(
-            target_id_text
-        )
-
+        target_telegram_id = int(target_id_text)
     except ValueError:
-
         await update.message.reply_text(
             "⚠️ Telegram ID يجب أن يكون رقمًا فقط.\n\n"
             "مثال:\n"
             "/user 8840372128"
         )
-
         return
 
     try:
-
         user = await asyncio.to_thread(
             get_user,
             target_telegram_id,
         )
 
         if not user:
-
             await update.message.reply_text(
                 "🔍 لم يتم العثور على هذا المستخدم "
                 "في قاعدة البيانات.\n\n"
                 f"Telegram ID: {target_telegram_id}"
             )
-
             return
 
-        username = user.get(
-            "username"
-        )
-
-        first_name = user.get(
-            "first_name"
-        )
-
-        questions_used = user.get(
-            "questions_used",
-            0,
-        )
-
+        username = user.get("username")
+        first_name = user.get("first_name")
+        questions_used = user.get("questions_used", 0)
         subscription_active = user.get(
             "subscription_active",
             False,
         )
-
         subscription_expires_at = user.get(
             "subscription_expires_at"
         )
-
-        created_at = user.get(
-            "created_at"
-        )
+        created_at = user.get("created_at")
 
         actual_subscription_active = False
 
         if subscription_active:
-
             if (
                 subscription_expires_at
-                and
-                subscription_expires_at > datetime.now(timezone.utc)
+                and subscription_expires_at > datetime.now(timezone.utc)
             ):
-
                 actual_subscription_active = True
-
             elif subscription_expires_at:
-
                 await asyncio.to_thread(
                     deactivate_expired_subscription,
                     target_telegram_id,
                 )
 
         if actual_subscription_active:
-
             subscription_status = "🟢 مفعّل"
-
         else:
-
             subscription_status = "⚪ غير مفعّل"
 
         remaining_free = max(
@@ -1007,41 +840,29 @@ async def user_details(
             0,
         )
 
-        if username:
+        username_text = (
+            f"@{username}"
+            if username
+            else "غير موجود"
+        )
 
-            username_text = f"@{username}"
+        name_text = (
+            first_name
+            if first_name
+            else "غير موجود"
+        )
 
-        else:
+        expires_text = (
+            str(subscription_expires_at)
+            if subscription_expires_at
+            else "لا يوجد"
+        )
 
-            username_text = "غير موجود"
-
-        if first_name:
-
-            name_text = first_name
-
-        else:
-
-            name_text = "غير موجود"
-
-        if subscription_expires_at:
-
-            expires_text = str(
-                subscription_expires_at
-            )
-
-        else:
-
-            expires_text = "لا يوجد"
-
-        if created_at:
-
-            created_text = str(
-                created_at
-            )
-
-        else:
-
-            created_text = "غير معروف"
+        created_text = (
+            str(created_at)
+            if created_at
+            else "غير معروف"
+        )
 
         message = (
             "👤 بيانات المستخدم\n\n"
@@ -1055,16 +876,10 @@ async def user_details(
             f"🕐 تاريخ إنشاء الحساب: {created_text}"
         )
 
-        await update.message.reply_text(
-            message
-        )
+        await update.message.reply_text(message)
 
     except Exception:
-
-        logger.exception(
-            "User details error"
-        )
-
+        logger.exception("User details error")
         await update.message.reply_text(
             "⚠️ حدث خطأ أثناء الحصول على بيانات المستخدم."
         )
@@ -1078,52 +893,43 @@ async def mydb(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
-
     if not update.effective_user:
         return
 
     telegram_id = update.effective_user.id
 
     if telegram_id != OWNER_TELEGRAM_ID:
-
         logger.warning(
             "Unauthorized /mydb attempt by user %s",
             telegram_id,
         )
-
         await update.message.reply_text(
             "⛔ هذا الأمر غير متاح."
         )
-
         return
 
     register_user(update)
 
     try:
-
         user = await asyncio.to_thread(
             get_user,
             telegram_id,
         )
 
         if not user:
-
             await update.message.reply_text(
                 "⚠️ لم يتم العثور على حسابك في قاعدة البيانات."
             )
-
             return
 
         username = (
             user.get("username")
-            or
-            "غير موجود"
+            or "غير موجود"
         )
 
         first_name = (
             user.get("first_name")
-            or
-            "غير موجود"
+            or "غير موجود"
         )
 
         questions_used = user.get(
@@ -1140,35 +946,24 @@ async def mydb(
             "subscription_expires_at"
         )
 
-        created_at = user.get(
-            "created_at"
+        created_at = user.get("created_at")
+
+        expires_text = (
+            str(subscription_expires_at)
+            if subscription_expires_at
+            else "لا يوجد"
         )
 
-        if subscription_expires_at:
-
-            expires_text = str(
-                subscription_expires_at
-            )
-
-        else:
-
-            expires_text = "لا يوجد"
-
-        if created_at:
-
-            created_text = str(
-                created_at
-            )
-
-        else:
-
-            created_text = "غير معروف"
+        created_text = (
+            str(created_at)
+            if created_at
+            else "غير معروف"
+        )
 
         status = (
             "🟢 مفعّل"
             if subscription_active
-            else
-            "⚪ غير مفعّل"
+            else "⚪ غير مفعّل"
         )
 
         remaining = max(
@@ -1176,19 +971,11 @@ async def mydb(
             0,
         )
 
-        if username != "غير موجود":
-
-            username_text = f"@{username}"
-
-        else:
-
-            username_text = username
-
         message = (
             "🗄️ بيانات حسابك في SanadAI\n\n"
             f"🆔 Telegram ID: {telegram_id}\n"
             f"👤 الاسم: {first_name}\n"
-            f"🔹 Username: {username_text}\n"
+            f"🔹 Username: @{username if username != 'غير موجود' else username}\n"
             f"🔢 الأسئلة المستخدمة: {questions_used}\n"
             f"🎁 الأسئلة المجانية المتبقية: {remaining}\n"
             f"💳 الاشتراك: {status}\n"
@@ -1197,16 +984,10 @@ async def mydb(
             "✅ قاعدة البيانات متصلة وحسابك مسجل."
         )
 
-        await update.message.reply_text(
-            message
-        )
+        await update.message.reply_text(message)
 
     except Exception:
-
-        logger.exception(
-            "Database check error"
-        )
-
+        logger.exception("Database check error")
         await update.message.reply_text(
             "⚠️ حدث خطأ أثناء فحص قاعدة البيانات."
         )
@@ -1217,23 +998,40 @@ async def mydb(
 # ============================================================
 
 async def run_gemini(contents):
-
     if gemini_client is None:
-
         raise RuntimeError(
             "GEMINI_API_KEY غير موجود."
         )
 
-    def generate():
+    started_at = time.monotonic()
 
+    def generate():
         return gemini_client.models.generate_content(
             model=GEMINI_MODEL,
             contents=contents,
         )
 
-    return await asyncio.to_thread(
-        generate
-    )
+    try:
+        result = await asyncio.to_thread(generate)
+
+        elapsed = time.monotonic() - started_at
+
+        logger.info(
+            "Gemini request completed in %.2f seconds",
+            elapsed,
+        )
+
+        return result
+
+    except Exception:
+        elapsed = time.monotonic() - started_at
+
+        logger.exception(
+            "Gemini request failed after %.2f seconds",
+            elapsed,
+        )
+
+        raise
 
 
 # ============================================================
@@ -1244,22 +1042,22 @@ async def handle_message(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
-
     register_user(update)
 
-    allowed = await check_and_consume(
-        update
-    )
+    allowed = await check_and_consume(update)
 
     if not allowed:
         return
 
     try:
-
         user_text = update.message.text
 
         if not user_text:
             return
+
+        await update.message.reply_text(
+            "⏳ جارٍ معالجة سؤالك..."
+        )
 
         response = await run_gemini(
             user_text
@@ -1268,7 +1066,6 @@ async def handle_message(
         answer = response.text
 
         if not answer:
-
             answer = (
                 "⚠️ لم أستطع الحصول على إجابة."
             )
@@ -1278,7 +1075,6 @@ async def handle_message(
         )
 
     except Exception:
-
         logger.exception(
             "Text processing error"
         )
@@ -1296,18 +1092,14 @@ async def handle_photo(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
-
     register_user(update)
 
-    allowed = await check_and_consume(
-        update
-    )
+    allowed = await check_and_consume(update)
 
     if not allowed:
         return
 
     try:
-
         await update.message.reply_text(
             "🖼️ تم استلام الصورة.\n"
             "⏳ جارٍ تحليلها..."
@@ -1330,12 +1122,10 @@ async def handle_photo(
         )
 
         contents = [
-
             types.Part.from_bytes(
                 data=bytes(image_bytes),
                 mime_type="image/jpeg",
             ),
-
             user_text,
         ]
 
@@ -1346,7 +1136,6 @@ async def handle_photo(
         answer = response.text
 
         if not answer:
-
             answer = (
                 "⚠️ لم أستطع تحليل الصورة."
             )
@@ -1356,7 +1145,6 @@ async def handle_photo(
         )
 
     except Exception:
-
         logger.exception(
             "Image processing error"
         )
@@ -1372,24 +1160,14 @@ async def handle_photo(
 # ============================================================
 
 SUPPORTED_DOCUMENTS = {
-
-    ".pdf":
-        "application/pdf",
-
+    ".pdf": "application/pdf",
     ".docx":
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-
     ".xlsx":
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-
-    ".xls":
-        "application/vnd.ms-excel",
-
-    ".csv":
-        "text/csv",
-
-    ".txt":
-        "text/plain",
+    ".xls": "application/vnd.ms-excel",
+    ".csv": "text/csv",
+    ".txt": "text/plain",
 }
 
 
@@ -1401,12 +1179,9 @@ async def handle_document(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
-
     register_user(update)
 
-    allowed = await check_and_consume(
-        update
-    )
+    allowed = await check_and_consume(update)
 
     if not allowed:
         return
@@ -1415,7 +1190,6 @@ async def handle_document(
     uploaded_file = None
 
     try:
-
         document = update.message.document
 
         if document is None:
@@ -1423,8 +1197,7 @@ async def handle_document(
 
         file_name = (
             document.file_name
-            or
-            "file"
+            or "file"
         )
 
         extension = os.path.splitext(
@@ -1434,7 +1207,6 @@ async def handle_document(
         mime_type = document.mime_type
 
         if extension not in SUPPORTED_DOCUMENTS:
-
             await update.message.reply_text(
                 "⚠️ هذا النوع من الملفات غير مدعوم حاليًا.\n\n"
                 "الأنواع المدعومة:\n"
@@ -1444,36 +1216,22 @@ async def handle_document(
                 "📋 CSV\n"
                 "📃 TXT"
             )
-
             return
 
         if not mime_type:
-
             mime_type = SUPPORTED_DOCUMENTS[
                 extension
             ]
 
         if extension == ".pdf":
-
             icon = "📄"
-
         elif extension == ".docx":
-
             icon = "📝"
-
-        elif extension in [
-            ".xlsx",
-            ".xls",
-        ]:
-
+        elif extension in [".xlsx", ".xls"]:
             icon = "📊"
-
         elif extension == ".csv":
-
             icon = "📋"
-
         else:
-
             icon = "📃"
 
         await update.message.reply_text(
@@ -1489,15 +1247,13 @@ async def handle_document(
         suffix = (
             extension
             if extension
-            else
-            ".tmp"
+            else ".tmp"
         )
 
         with tempfile.NamedTemporaryFile(
             delete=False,
             suffix=suffix,
         ) as temp_file:
-
             temp_path = temp_file.name
 
         await telegram_file.download_to_drive(
@@ -1505,7 +1261,6 @@ async def handle_document(
         )
 
         def upload_file():
-
             return gemini_client.files.upload(
                 file=temp_path
             )
@@ -1532,8 +1287,7 @@ async def handle_document(
             file_uri=uploaded_file.uri,
             mime_type=(
                 uploaded_file.mime_type
-                or
-                mime_type
+                or mime_type
             ),
         )
 
@@ -1547,7 +1301,6 @@ async def handle_document(
         answer = response.text
 
         if not answer:
-
             answer = (
                 "⚠️ تم استلام الملف، "
                 "لكن لم أستطع استخراج إجابة منه."
@@ -1558,7 +1311,6 @@ async def handle_document(
         )
 
     except Exception:
-
         logger.exception(
             "Document processing error"
         )
@@ -1569,21 +1321,11 @@ async def handle_document(
         )
 
     finally:
-
         if temp_path:
-
             try:
-
-                if os.path.exists(
-                    temp_path
-                ):
-
-                    os.remove(
-                        temp_path
-                    )
-
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
             except Exception:
-
                 logger.warning(
                     "Could not remove temporary file"
                 )
@@ -1594,29 +1336,17 @@ async def handle_document(
 # ============================================================
 
 def main():
-
-    # --------------------------------------------------------
-    # التحقق من المتغيرات الأساسية
-    # --------------------------------------------------------
-
     if not TELEGRAM_BOT_TOKEN:
-
         raise RuntimeError(
             "TELEGRAM_BOT_TOKEN غير موجود."
         )
 
     if not GEMINI_API_KEY:
-
         raise RuntimeError(
             "GEMINI_API_KEY غير موجود."
         )
 
-    # --------------------------------------------------------
-    # تهيئة قاعدة البيانات
-    # --------------------------------------------------------
-
     try:
-
         init_database()
 
         logger.info(
@@ -1624,26 +1354,16 @@ def main():
         )
 
     except Exception:
-
         logger.exception(
             "Database initialization failed."
         )
-
         raise
-
-    # --------------------------------------------------------
-    # إنشاء التطبيق
-    # --------------------------------------------------------
 
     application = (
         Application.builder()
         .token(TELEGRAM_BOT_TOKEN)
         .build()
     )
-
-    # --------------------------------------------------------
-    # أوامر Telegram
-    # --------------------------------------------------------
 
     application.add_handler(
         CommandHandler(
@@ -1687,20 +1407,12 @@ def main():
         )
     )
 
-    # --------------------------------------------------------
-    # الصور
-    # --------------------------------------------------------
-
     application.add_handler(
         MessageHandler(
             filters.PHOTO,
             handle_photo,
         )
     )
-
-    # --------------------------------------------------------
-    # الملفات
-    # --------------------------------------------------------
 
     application.add_handler(
         MessageHandler(
@@ -1709,10 +1421,6 @@ def main():
         )
     )
 
-    # --------------------------------------------------------
-    # الرسائل النصية
-    # --------------------------------------------------------
-
     application.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND,
@@ -1720,9 +1428,14 @@ def main():
         )
     )
 
-    # --------------------------------------------------------
-    # تشغيل Webhook على Render
-    # --------------------------------------------------------
+    logger.info(
+        "SanadAI bot is starting with Telegram webhook..."
+    )
+
+    logger.info(
+        "Telegram webhook URL: %s",
+        WEBHOOK_URL,
+    )
 
     port = int(
         os.environ.get(
@@ -1731,29 +1444,10 @@ def main():
         )
     )
 
-    logger.info(
-        "SanadAI bot is starting with Webhook..."
-    )
-
-    logger.info(
-        "Render external URL: %s",
-        RENDER_EXTERNAL_URL,
-    )
-
-    logger.info(
-        "Webhook URL: %s",
-        WEBHOOK_URL,
-    )
-
-    logger.info(
-        "Webhook port: %s",
-        port,
-    )
-
     application.run_webhook(
         listen="0.0.0.0",
         port=port,
-        url_path=WEBHOOK_PATH,
+        url_path=WEBHOOK_PATH.lstrip("/"),
         webhook_url=WEBHOOK_URL,
         allowed_updates=Update.ALL_TYPES,
         drop_pending_updates=False,
@@ -1765,5 +1459,4 @@ def main():
 # ============================================================
 
 if __name__ == "__main__":
-
     main()
