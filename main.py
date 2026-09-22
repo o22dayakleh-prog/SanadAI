@@ -28,6 +28,11 @@ from database import (
     get_user,
     increment_questions_used,
     get_user_stats,
+    get_users,
+    search_users,
+    get_recent_payments,
+    count_user_payments,
+    get_payment_stats,
     deactivate_expired_subscription,
     create_payment,
     get_payment_by_txid,
@@ -741,6 +746,178 @@ async def start(
 
 
 # ============================================================
+# معرفة Telegram ID الحالي
+# ============================================================
+
+async def whoami(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    if not update.effective_user:
+        return
+
+    telegram_id = update.effective_user.id
+    username = update.effective_user.username
+    first_name = update.effective_user.first_name
+
+    username_text = (
+        f"@{username}"
+        if username
+        else
+        "غير موجود"
+    )
+
+    await update.message.reply_text(
+        "🆔 معلومات حساب Telegram\n\n"
+        f"Telegram ID: {telegram_id}\n"
+        f"👤 الاسم: {first_name or 'غير موجود'}\n"
+        f"🔹 Username: {username_text}\n\n"
+        "استخدم هذا الرقم عند ضبط OWNER_TELEGRAM_ID في Render."
+    )
+
+
+# ============================================================
+# قائمة المستخدمين - للمالك فقط
+# ============================================================
+
+async def list_users(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    if not update.effective_user:
+        return
+
+    if update.effective_user.id != OWNER_TELEGRAM_ID:
+        await update.message.reply_text("⛔ هذا الأمر غير متاح.")
+        return
+
+    try:
+        rows = await asyncio.to_thread(get_users, 20, 0)
+
+        if not rows:
+            await update.message.reply_text("👥 لا يوجد مستخدمون مسجلون حاليًا.")
+            return
+
+        lines = ["👥 آخر مستخدمي SanadAI", ""]
+
+        for index, user in enumerate(rows, 1):
+            uid = user.get("telegram_id")
+            name = user.get("first_name") or "بدون اسم"
+            username = user.get("username")
+            questions = user.get("questions_used", 0)
+            active = user.get("subscription_active", False)
+            status = "🟢 اشتراك" if active else f"🎁 {max(FREE_QUESTIONS - questions, 0)} مجاني"
+            username_text = f"@{username}" if username else ""
+            lines.append(f"{index}. {name} {username_text}")
+            lines.append(f"   🆔 {uid} | {status}")
+
+        await update.message.reply_text("\n".join(lines))
+
+    except Exception:
+        logger.exception("List users error")
+        await update.message.reply_text("⚠️ حدث خطأ أثناء عرض المستخدمين.")
+
+
+# ============================================================
+# البحث عن مستخدم - للمالك فقط
+# الاستخدام: /searchuser كلمة
+# ============================================================
+
+async def search_user_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    if not update.effective_user:
+        return
+
+    if update.effective_user.id != OWNER_TELEGRAM_ID:
+        await update.message.reply_text("⛔ هذا الأمر غير متاح.")
+        return
+
+    if not context.args:
+        await update.message.reply_text("ℹ️ الاستخدام:\n/searchuser كلمة أو Telegram_ID")
+        return
+
+    query = " ".join(context.args).strip()
+
+    try:
+        rows = await asyncio.to_thread(search_users, query, 20)
+
+        if not rows:
+            await update.message.reply_text("🔍 لم يتم العثور على مستخدمين مطابقين.")
+            return
+
+        lines = [f"🔎 نتائج البحث عن: {query}", ""]
+        for user in rows:
+            uid = user.get("telegram_id")
+            name = user.get("first_name") or "بدون اسم"
+            username = user.get("username")
+            questions = user.get("questions_used", 0)
+            active = user.get("subscription_active", False)
+            status = "🟢 اشتراك فعال" if active else f"🎁 مستخدم مجاني ({questions}/{FREE_QUESTIONS})"
+            username_text = f"@{username}" if username else "بدون username"
+            lines.append(f"👤 {name} — {username_text}")
+            lines.append(f"🆔 {uid} | {status}")
+            lines.append("")
+
+        await update.message.reply_text("\n".join(lines))
+
+    except Exception:
+        logger.exception("Search users error")
+        await update.message.reply_text("⚠️ حدث خطأ أثناء البحث.")
+
+
+# ============================================================
+# عمليات الدفع - للمالك فقط
+# ============================================================
+
+async def payments_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    if not update.effective_user:
+        return
+
+    if update.effective_user.id != OWNER_TELEGRAM_ID:
+        await update.message.reply_text("⛔ هذا الأمر غير متاح.")
+        return
+
+    try:
+        stats = await asyncio.to_thread(get_payment_stats)
+        rows = await asyncio.to_thread(get_recent_payments, 10)
+
+        message = (
+            "💳 لوحة المدفوعات\n\n"
+            f"📊 إجمالي العمليات: {stats.get('total_payments', 0)}\n"
+            f"✅ عمليات مؤكدة: {stats.get('verified_payments', 0)}\n"
+            f"⏳ قيد الانتظار: {stats.get('pending_payments', 0)}\n"
+            f"❌ مرفوضة: {stats.get('rejected_payments', 0)}\n"
+            f"💰 إجمالي USDT المؤكد: {stats.get('verified_amount_usdt', 0)}\n\n"
+            "🧾 آخر العمليات:\n"
+        )
+
+        if not rows:
+            message += "لا توجد عمليات دفع حتى الآن."
+        else:
+            for row in rows:
+                message += (
+                    f"\n• {row.get('status')} | "
+                    f"{row.get('amount_usdt')} USDT | "
+                    f"ID: {row.get('telegram_id')}\n"
+                )
+
+        await update.message.reply_text(message)
+
+    except Exception:
+        logger.exception("Payments dashboard error")
+        await update.message.reply_text("⚠️ حدث خطأ أثناء عرض المدفوعات.")
+
+
+# ============================================================
 # أمر إدارة المستخدمين - للمالك فقط
 # ============================================================
 
@@ -801,6 +978,11 @@ async def users(
             0,
         )
 
+        free_users_exhausted = stats.get(
+            "free_users_exhausted",
+            0,
+        )
+
         total_questions_used = stats.get(
             "total_questions_used",
             0,
@@ -810,6 +992,7 @@ async def users(
             "👑 لوحة إدارة مستخدمي SanadAI\n\n"
             f"👥 إجمالي المستخدمين: {total_users}\n"
             f"🎁 لديهم أسئلة مجانية: {free_users_remaining}\n"
+            f"🚫 استنفدوا الأسئلة المجانية: {free_users_exhausted}\n"
             f"💳 الاشتراكات الفعالة: {active_subscribers}\n"
             f"⏰ الاشتراكات المنتهية: {expired_subscriptions}\n"
             f"🔢 إجمالي الأسئلة المستخدمة: {total_questions_used}\n\n"
@@ -915,6 +1098,11 @@ async def user_details(
 
             return
 
+        payment_count = await asyncio.to_thread(
+            count_user_payments,
+            target_telegram_id,
+        )
+
         username = user.get(
             "username"
         )
@@ -1018,6 +1206,7 @@ async def user_details(
             f"🎁 الأسئلة المجانية المتبقية: {remaining_free}\n"
             f"💳 الاشتراك: {subscription_status}\n"
             f"📅 انتهاء الاشتراك: {expires_text}\n"
+            f"💰 عدد عمليات الدفع: {payment_count}\n"
             f"🕐 تاريخ إنشاء الحساب: {created_text}"
         )
 
@@ -1645,8 +1834,36 @@ def main():
 
     application.add_handler(
         CommandHandler(
+            "whoami",
+            whoami,
+        )
+    )
+
+    application.add_handler(
+        CommandHandler(
             "users",
             users,
+        )
+    )
+
+    application.add_handler(
+        CommandHandler(
+            "listusers",
+            list_users,
+        )
+    )
+
+    application.add_handler(
+        CommandHandler(
+            "searchuser",
+            search_user_command,
+        )
+    )
+
+    application.add_handler(
+        CommandHandler(
+            "payments",
+            payments_command,
         )
     )
 
@@ -1711,4 +1928,3 @@ def main():
 if __name__ == "__main__":
 
     main()
-
