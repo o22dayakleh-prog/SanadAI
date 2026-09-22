@@ -14,6 +14,7 @@ from telegram import (
 from telegram.ext import (
     Application,
     CommandHandler,
+    CallbackQueryHandler,
     MessageHandler,
     ContextTypes,
     filters,
@@ -740,9 +741,210 @@ async def start(
         "أرسل ما تريد تحليله وسأحاول مساعدتك."
     )
 
-    await update.message.reply_text(
-        message
+    reply_markup = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "💬 ابدأ المحادثة",
+                    callback_data="menu_chat",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    "📊 حالة حسابي",
+                    callback_data="menu_status",
+                ),
+                InlineKeyboardButton(
+                    "💳 الاشتراك",
+                    callback_data="menu_subscribe",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    "ℹ️ طريقة الاستخدام",
+                    callback_data="menu_help",
+                ),
+            ],
+        ]
     )
+
+    await update.message.reply_text(
+        message,
+        reply_markup=reply_markup,
+    )
+
+
+# ============================================================
+# أزرار الواجهة الرئيسية
+# ============================================================
+
+async def start_menu_callback(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    query = update.callback_query
+
+    if not query:
+        return
+
+    await query.answer()
+
+    if not query.message:
+        return
+
+    action = query.data
+
+    if action == "menu_chat":
+
+        await query.message.reply_text(
+            "💬 أرسل الآن سؤالك أو أرسل صورة أو ملف، وسأحاول مساعدتك."
+        )
+
+        return
+
+    if action == "menu_status":
+
+        telegram_id = query.from_user.id
+
+        try:
+
+            user = await asyncio.to_thread(
+                get_user,
+                telegram_id,
+            )
+
+            if not user:
+
+                await query.message.reply_text(
+                    "⚠️ لم يتم العثور على حسابك في قاعدة البيانات."
+                )
+                return
+
+            questions_used = user.get(
+                "questions_used",
+                0,
+            )
+
+            remaining_free = max(
+                FREE_QUESTIONS - questions_used,
+                0,
+            )
+
+            subscription_active = user.get(
+                "subscription_active",
+                False,
+            )
+
+            subscription_expires_at = user.get(
+                "subscription_expires_at"
+            )
+
+            if subscription_active and subscription_expires_at:
+
+                if subscription_expires_at <= datetime.now(timezone.utc):
+
+                    await asyncio.to_thread(
+                        deactivate_expired_subscription,
+                        telegram_id,
+                    )
+                    subscription_active = False
+
+            status_text = (
+                "🟢 الاشتراك فعال"
+                if subscription_active
+                else
+                "⚪ لا يوجد اشتراك فعال"
+            )
+
+            expires_text = (
+                str(subscription_expires_at)
+                if subscription_expires_at
+                else
+                "لا يوجد"
+            )
+
+            await query.message.reply_text(
+                "📊 حالة حسابك في SanadAI\n\n"
+                f"🆔 Telegram ID: {telegram_id}\n"
+                f"🎁 الأسئلة المجانية المستخدمة: {questions_used}/{FREE_QUESTIONS}\n"
+                f"🎁 الأسئلة المجانية المتبقية: {remaining_free}\n\n"
+                f"💳 الحالة: {status_text}\n"
+                f"📅 انتهاء الاشتراك: {expires_text}\n\n"
+                "💡 للاشتراك استخدم: /subscribe"
+            )
+
+        except Exception:
+
+            logger.exception(
+                "Start menu status error"
+            )
+
+            await query.message.reply_text(
+                "⚠️ حدث خطأ أثناء الحصول على حالة حسابك."
+            )
+
+        return
+
+    if action == "menu_subscribe":
+
+        wallet = (
+            PAYMENT_WALLET
+            or
+            "عنوان الدفع غير مضبوط حاليًا."
+        )
+
+        message = (
+            "💳 اشتراك SanadAI\n\n"
+            f"💰 السعر: {SUBSCRIPTION_PRICE_USDT} USDT\n"
+            f"📅 المدة: {SUBSCRIPTION_DAYS} يومًا\n"
+            "🌐 الشبكة: TRON (TRC20)\n"
+            "🪙 العملة: USDT\n\n"
+            "📥 عنوان الدفع:\n"
+            f"<code>{wallet}</code>\n\n"
+            "👆 اضغط على عنوان المحفظة لنسخه بسهولة.\n\n"
+            "━━━━━━━━━━━━━━━━━━\n\n"
+            "بعد إتمام التحويل، أرسل رقم المعاملة TXID بهذا الشكل:\n\n"
+            "/pay TXID\n\n"
+            "🔎 سيتم التحقق من المعاملة على شبكة TRON قبل تفعيل الاشتراك.\n"
+            "🔐 لا ترسل أبدًا المفتاح الخاص لمحفظتك."
+        )
+
+        reply_markup = None
+
+        if PAYMENT_WALLET:
+            reply_markup = InlineKeyboardMarkup(
+                [[
+                    InlineKeyboardButton(
+                        "📋 نسخ عنوان الدفع",
+                        copy_text=CopyTextButton(
+                            text=PAYMENT_WALLET
+                        ),
+                    )
+                ]]
+            )
+
+        await query.message.reply_text(
+            message,
+            parse_mode="HTML",
+            reply_markup=reply_markup,
+        )
+
+        return
+
+    if action == "menu_help":
+
+        await query.message.reply_text(
+            "ℹ️ طريقة استخدام SanadAI\n\n"
+            "1️⃣ أرسل سؤالك كنص.\n"
+            "2️⃣ يمكنك إرسال صورة لتحليلها.\n"
+            "3️⃣ يمكنك إرسال PDF أو Word أو Excel أو CSV أو TXT.\n"
+            "4️⃣ لديك 3 أسئلة مجانية للبدء.\n"
+            "5️⃣ بعد انتهاء الأسئلة المجانية يمكنك استخدام /subscribe للاشتراك.\n\n"
+            "📊 لمعرفة حالة حسابك: /mystatus"
+        )
+
+        return
 
 
 # ============================================================
@@ -1948,6 +2150,13 @@ def main():
         CommandHandler(
             "mystatus",
             mystatus,
+        )
+    )
+
+    application.add_handler(
+        CallbackQueryHandler(
+            start_menu_callback,
+            pattern="^menu_",
         )
     )
 
