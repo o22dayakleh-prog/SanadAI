@@ -2,9 +2,15 @@ import os
 import logging
 import tempfile
 import asyncio
+import time
 from datetime import datetime, timezone, timedelta
 
-from telegram import Update
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    CopyTextButton,
+)
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -264,9 +270,24 @@ async def send_subscription_message(
         "🔐 لا ترسل أبدًا المفتاح الخاص لمحفظتك."
     )
 
+    reply_markup = None
+
+    if PAYMENT_WALLET:
+        reply_markup = InlineKeyboardMarkup(
+            [[
+                InlineKeyboardButton(
+                    "📋 نسخ عنوان الدفع",
+                    copy_text=CopyTextButton(
+                        text=PAYMENT_WALLET
+                    ),
+                )
+            ]]
+        )
+
     await update.message.reply_text(
         message,
         parse_mode="HTML",
+        reply_markup=reply_markup,
     )
 
 
@@ -382,6 +403,14 @@ async def pay(
                     f"🧾 TXID:\n{txid}"
                 )
 
+            elif existing_user_id == telegram_id and status in ("pending", "rejected"):
+
+                await update.message.reply_text(
+                    "🔄 هذه المعاملة مسجلة لديك ولكنها لم تعتمد بعد.\n"
+                    "🔎 سأعيد التحقق منها على شبكة TRON...\n"
+                    "⏳ قد يستغرق الفحص بضع ثوانٍ."
+                )
+
             elif existing_user_id == telegram_id:
 
                 await update.message.reply_text(
@@ -389,23 +418,24 @@ async def pay(
                     f"🧾 TXID:\n{txid}\n"
                     f"⏳ الحالة الحالية: {status}"
                 )
+                return
 
             else:
 
                 await update.message.reply_text(
                     "⚠️ هذه المعاملة مسجلة مسبقًا في النظام."
                 )
+                return
 
-            return
+        else:
+            # ----------------------------------------------------
+            # إعلام المستخدم ببدء التحقق لمعاملة جديدة
+            # ----------------------------------------------------
 
-        # ----------------------------------------------------
-        # إعلام المستخدم ببدء التحقق
-        # ----------------------------------------------------
-
-        await update.message.reply_text(
-            "🔎 جارٍ التحقق من المعاملة على شبكة TRON...\n"
-            "⏳ قد يستغرق الفحص بضع ثوانٍ."
-        )
+            await update.message.reply_text(
+                "🔎 جارٍ التحقق من المعاملة على شبكة TRON...\n"
+                "⏳ قد يستغرق الفحص بضع ثوانٍ."
+            )
 
         # ----------------------------------------------------
         # التحقق الحقيقي من البلوكشين
@@ -1152,6 +1182,8 @@ async def run_gemini(contents):
             "GEMINI_API_KEY غير موجود."
         )
 
+    start_time = time.perf_counter()
+
     def generate():
 
         return gemini_client.models.generate_content(
@@ -1159,37 +1191,28 @@ async def run_gemini(contents):
             contents=contents,
         )
 
-    started_at = asyncio.get_running_loop().time()
-
     try:
 
         response = await asyncio.to_thread(
             generate
         )
 
-        elapsed = (
-            asyncio.get_running_loop().time()
-            - started_at
-        )
+        elapsed = time.perf_counter() - start_time
 
         logger.info(
-            "Gemini response completed in %.2f seconds.",
+            "Gemini request completed in %.2f seconds",
             elapsed,
         )
 
         return response
 
-    except Exception as exc:
+    except Exception:
 
-        elapsed = (
-            asyncio.get_running_loop().time()
-            - started_at
-        )
+        elapsed = time.perf_counter() - start_time
 
         logger.exception(
-            "Gemini request failed after %.2f seconds: %s",
+            "Gemini request failed after %.2f seconds",
             elapsed,
-            exc,
         )
 
         raise
@@ -1688,3 +1711,4 @@ def main():
 if __name__ == "__main__":
 
     main()
+
