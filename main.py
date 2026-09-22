@@ -746,6 +746,111 @@ async def start(
 
 
 # ============================================================
+# حالة المستخدم والاشتراك
+# الاستخدام: /mystatus
+# ============================================================
+
+async def mystatus(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    if not update.effective_user:
+        return
+
+    telegram_id = update.effective_user.id
+
+    try:
+
+        user = await asyncio.to_thread(
+            get_user,
+            telegram_id,
+        )
+
+        if not user:
+
+            await update.message.reply_text(
+                "⚠️ لم يتم العثور على حسابك في قاعدة البيانات."
+            )
+
+            return
+
+        questions_used = user.get(
+            "questions_used",
+            0,
+        )
+
+        remaining_free = max(
+            FREE_QUESTIONS - questions_used,
+            0,
+        )
+
+        subscription_active = user.get(
+            "subscription_active",
+            False,
+        )
+
+        subscription_expires_at = user.get(
+            "subscription_expires_at"
+        )
+
+        # التأكد من أن الاشتراك ما زال ساريًا
+        if subscription_active:
+
+            if (
+                subscription_expires_at
+                and
+                subscription_expires_at <= datetime.now(timezone.utc)
+            ):
+
+                await asyncio.to_thread(
+                    deactivate_expired_subscription,
+                    telegram_id,
+                )
+
+                subscription_active = False
+
+        if subscription_active:
+
+            status_text = "🟢 الاشتراك فعال"
+
+            if subscription_expires_at:
+                expires_text = str(subscription_expires_at)
+            else:
+                expires_text = "غير محدد"
+
+        else:
+
+            status_text = "⚪ لا يوجد اشتراك فعال"
+            expires_text = (
+                str(subscription_expires_at)
+                if subscription_expires_at
+                else
+                "لا يوجد"
+            )
+
+        await update.message.reply_text(
+            "📊 حالة حسابك في SanadAI\n\n"
+            f"🆔 Telegram ID: {telegram_id}\n"
+            f"🎁 الأسئلة المجانية المستخدمة: {questions_used}/{FREE_QUESTIONS}\n"
+            f"🎁 الأسئلة المجانية المتبقية: {remaining_free}\n\n"
+            f"💳 الحالة: {status_text}\n"
+            f"📅 انتهاء الاشتراك: {expires_text}\n\n"
+            "💡 للاشتراك استخدم: /subscribe"
+        )
+
+    except Exception:
+
+        logger.exception(
+            "My status error"
+        )
+
+        await update.message.reply_text(
+            "⚠️ حدث خطأ أثناء الحصول على حالة حسابك."
+        )
+
+
+# ============================================================
 # معرفة Telegram ID الحالي
 # ============================================================
 
@@ -1836,6 +1941,13 @@ def main():
         CommandHandler(
             "whoami",
             whoami,
+        )
+    )
+
+    application.add_handler(
+        CommandHandler(
+            "mystatus",
+            mystatus,
         )
     )
 
