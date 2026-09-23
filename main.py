@@ -190,6 +190,56 @@ def remember_exchange(context, user_text, answer):
 
 gemini_client = None
 
+
+class GeminiQuotaError(Exception):
+    """خطأ خاص بانتهاء حصة Gemini أو الوصول إلى حد الاستخدام."""
+    pass
+
+
+def is_gemini_quota_error(exc):
+    error_text = str(exc).lower()
+    return (
+        "resource_exhausted" in error_text
+        or "generate_content_free_tier_requests" in error_text
+        or "quotafailure" in error_text
+        or "quota_limit" in error_text
+        or ("429" in error_text and "quota" in error_text)
+    )
+
+
+async def consume_free_question_after_success(update, should_consume):
+    if not should_consume or not update.effective_user:
+        return True
+
+    telegram_id = update.effective_user.id
+    new_count = await asyncio.to_thread(
+        consume_question,
+        telegram_id,
+    )
+
+    if new_count is None:
+        logger.error(
+            "AI response succeeded but free-question counter could not be updated for user %s",
+            telegram_id,
+        )
+        return False
+
+    logger.info(
+        "Free question consumed after successful AI response for user %s. New count: %s",
+        telegram_id,
+        new_count,
+    )
+    return True
+
+
+async def send_gemini_quota_message(update):
+    await update.message.reply_text(
+        "⚠️ خدمة الذكاء الاصطناعي وصلت حاليًا إلى حد الاستخدام المسموح من Gemini.\n\n"
+        "⏳ حاول مرة أخرى لاحقًا عندما تتجدد الحصة.\n\n"
+        "💡 هذه المشكلة من حصة خدمة الذكاء الاصطناعي وليست من سؤالك أو ملفك.\n"
+        "🎁 إذا كان حسابك مجانيًا، فلن يُحتسب هذا الطلب لأن المعالجة لم تكتمل."
+    )
+
 if GEMINI_API_KEY:
     gemini_client = genai.Client(
         api_key=GEMINI_API_KEY
@@ -741,20 +791,21 @@ async def pay(
 async def check_and_consume(
     update: Update,
 ):
-
+    """
+    يفحص صلاحية الاستخدام قبل معالجة الطلب.
+    لا يستهلك السؤال هنا؛ الاستهلاك يتم فقط بعد نجاح معالجة Gemini.
+    """
     if not update.effective_user:
-        return False
+        return False, False
 
     telegram_id = update.effective_user.id
 
     if telegram_id == OWNER_TELEGRAM_ID:
-
         logger.info(
             "Owner access granted for user %s",
             telegram_id,
         )
-
-        return True
+        return True, False
 
     allowed, user = await asyncio.to_thread(
         can_use_service,
@@ -762,12 +813,8 @@ async def check_and_consume(
     )
 
     if not allowed:
-
-        await send_subscription_message(
-            update
-        )
-
-        return False
+        await send_subscription_message(update)
+        return False, False
 
     subscription_active = (
         user.get(
@@ -779,30 +826,10 @@ async def check_and_consume(
     )
 
     if subscription_active:
+        return True, False
 
-        return True
-
-    new_count = await asyncio.to_thread(
-        consume_question,
-        telegram_id,
-    )
-
-    if new_count is None:
-
-        await update.message.reply_text(
-            "⚠️ حدث خطأ أثناء تسجيل استخدام السؤال.\n"
-            "حاول مرة أخرى."
-        )
-
-        return False
-
-    logger.info(
-        "Question consumed for user %s. New count: %s",
-        telegram_id,
-        new_count,
-    )
-
-    return True
+    # مستخدم مجاني: لا نستهلك السؤال إلا بعد نجاح Gemini.
+    return True, True
 
 
 # ============================================================
@@ -1817,6 +1844,18 @@ async def run_gemini(contents):
             last_error = exc
             attempt_elapsed = time.perf_counter() - attempt_start
 
+            if is_gemini_quota_error(exc):
+                logger.warning(
+                    "Gemini quota exhausted on attempt %d/%d after %.2f seconds: %s",
+                    attempt,
+                    max_attempts,
+                    attempt_elapsed,
+                    exc,
+                )
+                raise GeminiQuotaError(
+                    "وصلت خدمة Gemini حاليًا إلى حد الاستخدام المسموح."
+                ) from exc
+
             logger.exception(
                 "Gemini request failed on attempt %d/%d after %.2f seconds",
                 attempt,
@@ -1869,7 +1908,7 @@ async def handle_message(
 
     register_user(update)
 
-    allowed = await check_and_consume(update)
+    allowed, should_consume = await check_and_consume(update)
 
     if not allowed:
         return
@@ -1895,11 +1934,19 @@ async def handle_message(
 
         if not answer:
             answer = "⚠️ لم أستطع الحصول على إجابة مناسبة."
+            return
+
+        await consume_free_question_after_success(
+            update,
+            should_consume,
+        )
 
         remember_exchange(context, user_text, answer)
 
         await update.message.reply_text(answer)
 
+    except GeminiQuotaError:
+        await send_gemini_quota_message(update)
     except Exception:
         logger.exception("Text processing error")
         await update.message.reply_text(
@@ -1918,7 +1965,7 @@ async def handle_photo(
 
     register_user(update)
 
-    allowed = await check_and_consume(update)
+    allowed, should_consume = await check_and_consume(update)
     if not allowed:
         return
 
@@ -1959,10 +2006,18 @@ async def handle_photo(
 
         if not answer:
             answer = "⚠️ لم أستطع تحليل الصورة."
+            return
+
+        await consume_free_question_after_success(
+            update,
+            should_consume,
+        )
 
         remember_exchange(context, user_text, answer)
         await update.message.reply_text(answer)
 
+    except GeminiQuotaError:
+        await send_gemini_quota_message(update)
     except Exception:
         logger.exception("Image processing error")
         await update.message.reply_text(
@@ -2007,7 +2062,7 @@ async def handle_document(
 
     register_user(update)
 
-    allowed = await check_and_consume(
+    allowed, should_consume = await check_and_consume(
         update
     )
 
@@ -2158,6 +2213,12 @@ async def handle_document(
                 "⚠️ تم استلام الملف، "
                 "لكن لم أستطع استخراج إجابة منه."
             )
+            return
+
+        await consume_free_question_after_success(
+            update,
+            should_consume,
+        )
 
         remember_exchange(context, user_request, answer)
 
@@ -2165,6 +2226,8 @@ async def handle_document(
             answer
         )
 
+    except GeminiQuotaError:
+        await send_gemini_quota_message(update)
     except Exception:
 
         logger.exception(
