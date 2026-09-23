@@ -1783,31 +1783,79 @@ async def run_gemini(contents):
             ),
         )
 
-    try:
+    # إعادة المحاولة تلقائيًا عند حدوث خطأ مؤقت في الاتصال أو خدمة Gemini.
+    # هذا يمنع إجبار المستخدم على إرسال السؤال مرة ثانية يدويًا.
+    max_attempts = 3
+    retry_delays = (1.0, 2.0)
+    last_error = None
 
-        response = await asyncio.to_thread(
-            generate
-        )
+    for attempt in range(1, max_attempts + 1):
 
-        elapsed = time.perf_counter() - start_time
+        attempt_start = time.perf_counter()
 
-        logger.info(
-            "Gemini request completed in %.2f seconds",
-            elapsed,
-        )
+        try:
 
-        return response
+            response = await asyncio.to_thread(
+                generate
+            )
 
-    except Exception:
+            elapsed = time.perf_counter() - start_time
+            attempt_elapsed = time.perf_counter() - attempt_start
 
-        elapsed = time.perf_counter() - start_time
+            logger.info(
+                "Gemini request completed on attempt %d/%d in %.2f seconds (attempt %.2f seconds)",
+                attempt,
+                max_attempts,
+                elapsed,
+                attempt_elapsed,
+            )
 
-        logger.exception(
-            "Gemini request failed after %.2f seconds",
-            elapsed,
-        )
+            return response
 
-        raise
+        except Exception as exc:
+
+            last_error = exc
+            attempt_elapsed = time.perf_counter() - attempt_start
+
+            logger.exception(
+                "Gemini request failed on attempt %d/%d after %.2f seconds",
+                attempt,
+                max_attempts,
+                attempt_elapsed,
+            )
+
+            if attempt >= max_attempts:
+                break
+
+            # لا نعيد المحاولة للأخطاء الواضحة التي لن تنحل بإعادة الطلب.
+            error_text = str(exc).lower()
+            permanent_markers = (
+                "api key",
+                "permission denied",
+                "unauthorized",
+                "invalid argument",
+                "invalid api key",
+                "authentication",
+            )
+
+            if any(marker in error_text for marker in permanent_markers):
+                break
+
+            delay = retry_delays[attempt - 1]
+            logger.warning(
+                "Retrying Gemini request in %.1f seconds...",
+                delay,
+            )
+            await asyncio.sleep(delay)
+
+    elapsed = time.perf_counter() - start_time
+    logger.error(
+        "Gemini request failed permanently after %.2f seconds and %d attempts",
+        elapsed,
+        max_attempts,
+    )
+
+    raise last_error
 
 
 # ============================================================
